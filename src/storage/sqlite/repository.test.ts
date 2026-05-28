@@ -162,6 +162,25 @@ test("upsertCollectedLead with duplicate domain returns deduped and does not thr
   });
 });
 
+test("getRun returns the RunRecord for an existing run", () => {
+  const db = freshDb();
+  const repo = createSqliteLeadRepository(db);
+  const run = repo.startRun({ source: "fake", limit: 7 });
+
+  const got = repo.getRun(run.id);
+  expect(got).not.toBeNull();
+  expect(got?.id).toBe(run.id);
+  expect(got?.source).toBe("fake");
+  expect(got?.limit).toBe(7);
+  expect(got?.startedAt).toBe(run.startedAt);
+});
+
+test("getRun returns null for an unknown run id", () => {
+  const db = freshDb();
+  const repo = createSqliteLeadRepository(db);
+  expect(repo.getRun("does-not-exist")).toBeNull();
+});
+
 test("countByRun for an unknown run id returns zeros", () => {
   const db = freshDb();
   const repo = createSqliteLeadRepository(db);

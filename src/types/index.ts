@@ -62,6 +62,7 @@ export type RunStatus = "completed" | "partial" | "failed";
 export interface LeadRepository {
   startRun(input: { source: string; limit: number }): RunRecord;
   finishRun(runId: string, status: RunStatus, errorSummary?: string): void;
+  getRun(runId: string): RunRecord | null;
   upsertCollectedLead(lead: CollectedLead, runId: string): StoredLeadResult;
   countByRun(runId: string): RunCounts;
 }

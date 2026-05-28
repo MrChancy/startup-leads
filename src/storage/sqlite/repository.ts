@@ -33,6 +33,16 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
     "UPDATE runs SET status = ?, error_summary = ?, finished_at = ? WHERE id = ?",
   );
 
+  const selectRun = db.prepare<
+    {
+      id: string;
+      started_at: string;
+      source: string;
+      limit_value: number;
+    },
+    [string]
+  >("SELECT id, started_at, source, limit_value FROM runs WHERE id = ?");
+
   const insertSource = db.prepare<
     { id: number },
     [string, string | null, string | null, string]
@@ -121,6 +131,17 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
         new Date().toISOString(),
         runId,
       );
+    },
+
+    getRun(runId) {
+      const row = selectRun.get(runId);
+      if (!row) return null;
+      return {
+        id: row.id,
+        startedAt: row.started_at,
+        source: row.source,
+        limit: row.limit_value,
+      };
     },
 
     upsertCollectedLead(lead: CollectedLead, runId): StoredLeadResult {

@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS contacts (
   contact_type TEXT,
   value TEXT,
   profile_url TEXT,
-  source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE SET NULL,
+  source_id INTEGER REFERENCES sources(id) ON DELETE SET NULL,
   risk_level TEXT,
   manual_review_required INTEGER,
   usage_status TEXT,

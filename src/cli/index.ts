@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { parseArgs, HELP_TEXT } from "./args.ts";
 import { runCollect } from "./collect.ts";
+import { runReport } from "./report.ts";
 import { fakeCollector } from "../collectors/fake.ts";
 import { openLeadRepository } from "../storage/index.ts";
 import { formatRunReport } from "../reporting/minimal.ts";
@@ -43,8 +44,13 @@ async function main() {
     }
 
     if (parsed.kind === "report") {
-      const counts = repo.countByRun(parsed.runId);
-      process.stdout.write(formatRunReport(parsed.runId, counts) + "\n");
+      const result = runReport({ repo, runId: parsed.runId });
+      if (!result.found) {
+        process.stderr.write(result.line + "\n");
+        close();
+        process.exit(1);
+      }
+      process.stdout.write(result.line + "\n");
       return;
     }
   } finally {
