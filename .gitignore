@@ -92,3 +92,6 @@ Desktop.ini
 *.tsbuildinfo      # tsc 增量编译缓存
 .cache/
 .turbo/
+
+# IDE — Cursor
+.cursor/
