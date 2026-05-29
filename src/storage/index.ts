@@ -11,6 +11,8 @@ export type {
   CollectedJob,
   CollectedContact,
   FreshnessStatus,
+  PurgeCounts,
+  RiskLevel,
 } from "../types/index.ts";
 
 export { openLeadRepository } from "./sqlite/open.ts";

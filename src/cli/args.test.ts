@@ -39,7 +39,73 @@ test("parseArgs unknown command returns error", () => {
   expect(parsed.kind).toBe("error");
 });
 
-test("HELP_TEXT mentions both subcommands", () => {
+test("HELP_TEXT mentions all subcommands", () => {
   expect(HELP_TEXT).toContain("collect");
   expect(HELP_TEXT).toContain("report");
+  expect(HELP_TEXT).toContain("purge");
+});
+
+// --- purge ----------------------------------------------------------------
+
+test("parseArgs purge --older-than", () => {
+  expect(parseArgs(["purge", "--older-than", "180d"])).toEqual({
+    kind: "purge",
+    mode: { kind: "older-than", cutoffMs: 180 * 86_400_000 },
+    confirm: false,
+  });
+});
+
+test("parseArgs purge --older-than --yes", () => {
+  expect(parseArgs(["purge", "--older-than", "30d", "--yes"])).toEqual({
+    kind: "purge",
+    mode: { kind: "older-than", cutoffMs: 30 * 86_400_000 },
+    confirm: true,
+  });
+});
+
+test("parseArgs purge --risk", () => {
+  expect(parseArgs(["purge", "--risk", "blocked,high"])).toEqual({
+    kind: "purge",
+    mode: { kind: "risk", levels: ["blocked", "high"] },
+    confirm: false,
+  });
+});
+
+test("parseArgs purge --company", () => {
+  expect(parseArgs(["purge", "--company", "acme.ai", "--yes"])).toEqual({
+    kind: "purge",
+    mode: { kind: "company", domain: "acme.ai" },
+    confirm: true,
+  });
+});
+
+test("parseArgs purge with no mode is an error", () => {
+  const r = parseArgs(["purge"]);
+  expect(r.kind).toBe("error");
+  expect(r.kind === "error" && r.message).toMatch(/--older-than|--risk|--company/);
+});
+
+test("parseArgs purge with two modes is an error", () => {
+  const r = parseArgs(["purge", "--older-than", "30d", "--risk", "blocked"]);
+  expect(r.kind).toBe("error");
+});
+
+test("parseArgs purge bubbles parseAge errors", () => {
+  const r = parseArgs(["purge", "--older-than", "abc"]);
+  expect(r.kind).toBe("error");
+});
+
+test("parseArgs purge bubbles parseRiskList errors", () => {
+  const r = parseArgs(["purge", "--risk", "unknown"]);
+  expect(r.kind).toBe("error");
+});
+
+test("parseArgs purge --older-than missing value is an error", () => {
+  const r = parseArgs(["purge", "--older-than"]);
+  expect(r.kind).toBe("error");
+});
+
+test("parseArgs purge --company empty is an error", () => {
+  const r = parseArgs(["purge", "--company", ""]);
+  expect(r.kind).toBe("error");
 });

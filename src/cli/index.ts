@@ -2,6 +2,7 @@
 import { parseArgs, HELP_TEXT } from "./args.ts";
 import { runCollect } from "./collect.ts";
 import { runReport } from "./report.ts";
+import { formatPurgeResult, runPurge } from "./purge.ts";
 import { fakeCollector } from "../collectors/fake.ts";
 import { hnCollector, HN_SOURCE } from "../collectors/hn/index.ts";
 import { openLeadRepository } from "../storage/index.ts";
@@ -53,6 +54,16 @@ async function main() {
         process.exit(1);
       }
       process.stdout.write(result.line + "\n");
+      return;
+    }
+
+    if (parsed.kind === "purge") {
+      const result = runPurge({
+        repo,
+        mode: parsed.mode,
+        confirm: parsed.confirm,
+      });
+      process.stdout.write(formatPurgeResult(result) + "\n");
       return;
     }
   } finally {

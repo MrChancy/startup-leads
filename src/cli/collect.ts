@@ -83,29 +83,49 @@ export async function runCollect(input: {
       // the input) rolls back the company / domain / source / events too —
       // no permanent "stored without a score" orphans. Nested SAVEPOINTs
       // mean the inner upsertCollectedLead tx still works.
-      repo.withTransaction(() => {
-        const stored = repo.upsertCollectedLead(lead, run.id);
-        // Skip scoring on dedupe: the existing company already has its
-        // most recent scoring snapshot from the previous run, and
-        // re-scoring would duplicate audit rows without new evidence.
-        if (stored.status === "deduped") return;
-        const scoreInput = toScoreInput(lead, stored.companyId, now);
-        const result = scoreCompany(scoreInput);
-        repo.writeLeadScore({
-          companyId: result.companyId,
-          runId: run.id,
-          score: result.score,
-          jobMatchScore: result.jobMatchScore,
-          directionScore: result.directionScore,
-          freshnessScore: result.freshnessScore,
-          contactScore: result.contactScore,
-          actionabilityScore: result.actionabilityScore,
-          matchReason: result.matchReason,
-          decision: result.decision,
-          scorerVersion: result.scorerVersion,
+      // TB-12: per-lead errors (e.g. empty source.retrievedAt) get recorded
+      // as parse_failed and the loop continues. A single bad collector
+      // payload shouldn't abort the whole run.
+      try {
+        repo.withTransaction(() => {
+          const stored = repo.upsertCollectedLead(lead, run.id);
+          // Skip scoring on dedupe: the existing company already has its
+          // most recent scoring snapshot from the previous run, and
+          // re-scoring would duplicate audit rows without new evidence.
+          if (stored.status === "deduped") return;
+          const scoreInput = toScoreInput(lead, stored.companyId, now);
+          const result = scoreCompany(scoreInput);
+          repo.writeLeadScore({
+            companyId: result.companyId,
+            runId: run.id,
+            score: result.score,
+            jobMatchScore: result.jobMatchScore,
+            directionScore: result.directionScore,
+            freshnessScore: result.freshnessScore,
+            contactScore: result.contactScore,
+            actionabilityScore: result.actionabilityScore,
+            matchReason: result.matchReason,
+            decision: result.decision,
+            scorerVersion: result.scorerVersion,
+          });
         });
-      });
+      } catch (perLeadErr) {
+        // Per-lead failure: inner tx already rolled back, no orphan rows.
+        // Surface to stderr so operators see the underlying message — silent
+        // counters were the L-6 finding on PR #5. Then record on the run so
+        // countByRun reports parse_failed; do NOT re-throw, the next lead
+        // might still be fine.
+        const msg =
+          perLeadErr instanceof Error ? perLeadErr.message : String(perLeadErr);
+        process.stderr.write(`collect: lead failed — ${msg}\n`);
+        repo.recordRunEvent(run.id, "parse_failed");
+      }
     }
+    // Note (M-5): when a per-lead tx rolls back, the `candidate` event it
+    // emitted is also undone. countByRun therefore reports
+    // `candidates = stored + deduped` (no failed leads), and `parse_failed`
+    // tracks the failures separately. This is intentional: "candidates"
+    // counts what made it past the storage gate, not raw collector output.
     repo.finishRun(run.id, "completed");
   } catch (err) {
     repo.finishRun(
