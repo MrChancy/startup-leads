@@ -3,11 +3,12 @@ import type { LeadRepository } from "../../types/index.ts";
 import { runMigrations } from "./migrations.ts";
 import { createSqliteLeadRepository } from "./repository.ts";
 
-// Test-only helper. Lives inside src/storage/sqlite/ so callers never have to
-// import `bun:sqlite` directly; tests get a typed `peek` surface for the
-// assertions they actually want to make.
+// Test-only helper. Centralizes the bun:sqlite import so test files don't
+// need it themselves; `db` is exposed for ad-hoc verification queries that
+// don't deserve a dedicated `peek` method.
 export interface InMemoryRepository {
   repo: LeadRepository;
+  db: Database;
   peek: {
     runRow(
       runId: string,
@@ -24,6 +25,7 @@ export function createInMemoryRepository(): InMemoryRepository {
 
   return {
     repo,
+    db,
     peek: {
       runRow(runId) {
         const row = db

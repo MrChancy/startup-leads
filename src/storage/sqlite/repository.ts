@@ -101,6 +101,26 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
+  const insertContact = db.prepare<
+    void,
+    [
+      number,
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+      number | null,
+      string | null,
+      string,
+      string,
+    ]
+  >(
+    `INSERT INTO contacts
+     (company_id, name, title, contact_type, value, profile_url, source_id, risk_level, row_created_at, row_updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
   const insertEvent = db.prepare<
     void,
     [string, string, number | null, string]
@@ -144,69 +164,89 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
       };
     },
 
-    upsertCollectedLead(lead: CollectedLead, runId): StoredLeadResult {
-      const now = new Date().toISOString();
+    upsertCollectedLead: db.transaction(
+      (lead: CollectedLead, runId: string): StoredLeadResult => {
+        const now = new Date().toISOString();
 
-      insertEvent.run(runId, "candidate", null, now);
+        insertEvent.run(runId, "candidate", null, now);
 
-      // Sources are append-only audit rows — every collect attempt logs evidence,
-      // even when the company itself dedupes.
-      const sourceRow = insertSource.get(
-        lead.source.sourceType,
-        lead.source.sourceUrl ?? null,
-        lead.source.sourceTitle ?? null,
-        lead.source.retrievedAt,
-      );
-      const sourceId = sourceRow!.id;
+        const sourceRow = insertSource.get(
+          lead.source.sourceType,
+          lead.source.sourceUrl ?? null,
+          lead.source.sourceTitle ?? null,
+          lead.source.retrievedAt,
+        );
+        const sourceId = sourceRow!.id;
 
-      if (lead.domain) {
-        const existing = selectCompanyByDomain.get(lead.domain);
-        if (existing) {
-          insertEvent.run(runId, "deduped", existing.company_id, now);
-          return { companyId: existing.company_id, status: "deduped" };
+        if (lead.domain) {
+          const existing = selectCompanyByDomain.get(lead.domain);
+          if (existing) {
+            insertEvent.run(runId, "deduped", existing.company_id, now);
+            return { companyId: existing.company_id, status: "deduped" };
+          }
         }
-      }
 
-      const companyRow = insertCompany.get(
-        lead.companyName,
-        normalize(lead.companyName),
-        lead.description ?? null,
-        lead.directionTags?.join(",") ?? null,
-        now,
-        now,
-      );
-      const companyId = companyRow!.id;
-
-      if (lead.domain) {
-        const domainRow = insertDomain.get(
-          companyId,
-          lead.domain,
-          1,
-          sourceId,
-          now,
-        );
-        setPrimaryDomain.run(domainRow!.id, now, companyId);
-      }
-
-      for (const job of lead.jobs) {
-        insertJob.run(
-          companyId,
-          job.title,
-          normalize(job.title),
-          job.jobUrl ?? null,
-          job.location ?? null,
-          job.remotePolicy ?? null,
-          job.freshness,
-          sourceId,
+        const companyRow = insertCompany.get(
+          lead.companyName,
+          normalize(lead.companyName),
+          lead.description ?? null,
+          lead.directionTags?.join(",") ?? null,
           now,
           now,
         );
-      }
+        const companyId = companyRow!.id;
 
-      insertEvent.run(runId, "stored", companyId, now);
+        if (lead.domain) {
+          const domainRow = insertDomain.get(
+            companyId,
+            lead.domain,
+            1,
+            sourceId,
+            now,
+          );
+          setPrimaryDomain.run(domainRow!.id, now, companyId);
+        }
 
-      return { companyId, status: "created" };
-    },
+        for (const job of lead.jobs) {
+          insertJob.run(
+            companyId,
+            job.title,
+            normalize(job.title),
+            job.jobUrl ?? null,
+            job.location ?? null,
+            job.remotePolicy ?? null,
+            job.freshness,
+            sourceId,
+            now,
+            now,
+          );
+        }
+
+        // Naive contact persistence: insert each row as supplied. Dedup by
+        // profile_url/value belongs to TB-9/TB-10's enrichers + TB-12 purge.
+        // blocked-risk contacts are intentionally NOT persisted (see spec
+        // "Local Data Retention").
+        for (const contact of lead.contacts) {
+          if (contact.riskLevel === "blocked") continue;
+          insertContact.run(
+            companyId,
+            contact.name ?? null,
+            contact.title ?? null,
+            contact.contactType,
+            contact.value,
+            contact.profileUrl ?? null,
+            sourceId,
+            contact.riskLevel,
+            now,
+            now,
+          );
+        }
+
+        insertEvent.run(runId, "stored", companyId, now);
+
+        return { companyId, status: "created" };
+      },
+    ),
 
     countByRun(runId): RunCounts {
       const counts: RunCounts = {

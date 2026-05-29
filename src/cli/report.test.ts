@@ -1,17 +1,9 @@
 import { test, expect } from "bun:test";
-import { Database } from "bun:sqlite";
-import { runMigrations } from "../storage/sqlite/migrations.ts";
-import { createSqliteLeadRepository } from "../storage/sqlite/repository.ts";
+import { createInMemoryRepository } from "../storage/sqlite/test-support.ts";
 import { runReport } from "./report.ts";
 
-function freshRepo() {
-  const db = new Database(":memory:");
-  runMigrations(db);
-  return createSqliteLeadRepository(db);
-}
-
 test("runReport returns found=true and canonical line for an existing run", () => {
-  const repo = freshRepo();
+  const { repo } = createInMemoryRepository();
   const run = repo.startRun({ source: "fake", limit: 1 });
   repo.finishRun(run.id, "completed");
 
@@ -23,7 +15,7 @@ test("runReport returns found=true and canonical line for an existing run", () =
 });
 
 test("runReport returns found=false and a not-found line for an unknown run id", () => {
-  const repo = freshRepo();
+  const { repo } = createInMemoryRepository();
   const result = runReport({ repo, runId: "does-not-exist" });
   expect(result.found).toBe(false);
   expect(result.line).toBe("Run does-not-exist not found");

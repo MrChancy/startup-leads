@@ -1,14 +1,6 @@
 import { test, expect } from "bun:test";
-import { Database } from "bun:sqlite";
-import { runMigrations } from "./migrations.ts";
-import { createSqliteLeadRepository } from "./repository.ts";
+import { createInMemoryRepository } from "./test-support.ts";
 import type { CollectedLead } from "../../types/index.ts";
-
-function freshDb() {
-  const db = new Database(":memory:");
-  runMigrations(db);
-  return db;
-}
 
 const sampleLead = (): CollectedLead => ({
   companyName: "Acme AI",
@@ -32,8 +24,7 @@ const sampleLead = (): CollectedLead => ({
 });
 
 test("startRun inserts a runs row with status=partial", () => {
-  const db = freshDb();
-  const repo = createSqliteLeadRepository(db);
+  const { repo, db } = createInMemoryRepository();
 
   const run = repo.startRun({ source: "fake", limit: 50 });
 
@@ -54,8 +45,7 @@ test("startRun inserts a runs row with status=partial", () => {
 });
 
 test("finishRun updates status and finished_at", () => {
-  const db = freshDb();
-  const repo = createSqliteLeadRepository(db);
+  const { repo, db } = createInMemoryRepository();
   const run = repo.startRun({ source: "fake", limit: 1 });
 
   repo.finishRun(run.id, "completed");
@@ -70,8 +60,7 @@ test("finishRun updates status and finished_at", () => {
 });
 
 test("upsertCollectedLead inserts company, domain, job, and source rows", () => {
-  const db = freshDb();
-  const repo = createSqliteLeadRepository(db);
+  const { repo, db } = createInMemoryRepository();
   const run = repo.startRun({ source: "fake", limit: 1 });
 
   const result = repo.upsertCollectedLead(sampleLead(), run.id);
@@ -109,8 +98,7 @@ test("upsertCollectedLead inserts company, domain, job, and source rows", () => 
 });
 
 test("countByRun reports candidate/stored counts for one run", () => {
-  const db = freshDb();
-  const repo = createSqliteLeadRepository(db);
+  const { repo } = createInMemoryRepository();
   const run = repo.startRun({ source: "fake", limit: 1 });
 
   repo.upsertCollectedLead(sampleLead(), run.id);
@@ -127,8 +115,7 @@ test("countByRun reports candidate/stored counts for one run", () => {
 });
 
 test("upsertCollectedLead with duplicate domain returns deduped and does not throw", () => {
-  const db = freshDb();
-  const repo = createSqliteLeadRepository(db);
+  const { repo, db } = createInMemoryRepository();
 
   const run1 = repo.startRun({ source: "fake", limit: 1 });
   const first = repo.upsertCollectedLead(sampleLead(), run1.id);
@@ -162,9 +149,121 @@ test("upsertCollectedLead with duplicate domain returns deduped and does not thr
   });
 });
 
+test("upsertCollectedLead persists lead.contacts when present", () => {
+  const { repo, db } = createInMemoryRepository();
+  const run = repo.startRun({ source: "fake", limit: 1 });
+
+  const leadWithContacts = {
+    ...sampleLead(),
+    contacts: [
+      {
+        name: "Alice",
+        title: "CTO",
+        contactType: "email",
+        value: "alice@acme.ai",
+        riskLevel: "low" as const,
+      },
+      {
+        name: "Bob",
+        contactType: "linkedin",
+        value: "https://linkedin.com/in/bob",
+        profileUrl: "https://linkedin.com/in/bob",
+        riskLevel: "medium" as const,
+      },
+    ],
+  };
+
+  const result = repo.upsertCollectedLead(leadWithContacts, run.id);
+  expect(result.status).toBe("created");
+
+  const rows = db
+    .query<
+      {
+        name: string | null;
+        contact_type: string;
+        value: string;
+        risk_level: string;
+      },
+      [number]
+    >(
+      "SELECT name, contact_type, value, risk_level FROM contacts WHERE company_id = ? ORDER BY id",
+    )
+    .all(result.companyId);
+  expect(rows).toHaveLength(2);
+  expect(rows[0]?.name).toBe("Alice");
+  expect(rows[0]?.contact_type).toBe("email");
+  expect(rows[0]?.value).toBe("alice@acme.ai");
+  expect(rows[0]?.risk_level).toBe("low");
+  expect(rows[1]?.name).toBe("Bob");
+  expect(rows[1]?.contact_type).toBe("linkedin");
+  expect(rows[1]?.risk_level).toBe("medium");
+});
+
+test("upsertCollectedLead rolls back the whole lead when a later insert fails", () => {
+  const { repo, db } = createInMemoryRepository();
+
+  // Seed first lead so its job_url is already taken.
+  const run1 = repo.startRun({ source: "fake", limit: 1 });
+  repo.upsertCollectedLead(sampleLead(), run1.id);
+  repo.finishRun(run1.id, "completed");
+
+  const companiesBefore = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM companies")
+    .get();
+  const sourcesBefore = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM sources")
+    .get();
+  const jobsBefore = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM jobs")
+    .get();
+  const domainsBefore = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM company_domains")
+    .get();
+
+  // A new lead under a fresh domain (skips dedupe) reusing the seeded job_url.
+  const run2 = repo.startRun({ source: "fake", limit: 1 });
+  const conflicting = {
+    ...sampleLead(),
+    companyName: "Other AI",
+    domain: "other.ai",
+    jobs: [
+      {
+        title: "Backend Engineer",
+        jobUrl: "https://acme.ai/jobs/be", // collides with seed
+        freshness: "fresh" as const,
+      },
+    ],
+  };
+
+  expect(() => repo.upsertCollectedLead(conflicting, run2.id)).toThrow();
+
+  const companiesAfter = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM companies")
+    .get();
+  const sourcesAfter = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM sources")
+    .get();
+  const jobsAfter = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM jobs")
+    .get();
+  const domainsAfter = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM company_domains")
+    .get();
+
+  expect(companiesAfter?.c).toBe(companiesBefore?.c);
+  expect(sourcesAfter?.c).toBe(sourcesBefore?.c);
+  expect(jobsAfter?.c).toBe(jobsBefore?.c);
+  expect(domainsAfter?.c).toBe(domainsBefore?.c);
+
+  // The candidate event for run2 also rolls back along with the rest.
+  const counts = repo.countByRun(run2.id);
+  expect(counts.candidates).toBe(0);
+  expect(counts.stored).toBe(0);
+  expect(counts.deduped).toBe(0);
+});
+
 test("getRun returns the RunRecord for an existing run", () => {
-  const db = freshDb();
-  const repo = createSqliteLeadRepository(db);
+  const { repo } = createInMemoryRepository();
   const run = repo.startRun({ source: "fake", limit: 7 });
 
   const got = repo.getRun(run.id);
@@ -176,14 +275,12 @@ test("getRun returns the RunRecord for an existing run", () => {
 });
 
 test("getRun returns null for an unknown run id", () => {
-  const db = freshDb();
-  const repo = createSqliteLeadRepository(db);
+  const { repo } = createInMemoryRepository();
   expect(repo.getRun("does-not-exist")).toBeNull();
 });
 
 test("countByRun for an unknown run id returns zeros", () => {
-  const db = freshDb();
-  const repo = createSqliteLeadRepository(db);
+  const { repo } = createInMemoryRepository();
   expect(repo.countByRun("does-not-exist")).toEqual({
     candidates: 0,
     stored: 0,
