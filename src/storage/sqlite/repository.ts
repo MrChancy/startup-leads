@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
+import { normalizeCompanyName } from "../../normalizers/company-name.ts";
+import { isDirectionTag } from "../../types/direction-tags.ts";
 import type {
   CollectedLead,
   DecisionCounts,
@@ -11,10 +13,29 @@ import type {
   StoredLeadResult,
 } from "../../types/index.ts";
 
-// Normalize a company display name into a comparable key.
-// TB-1 keeps this trivial; TB-4 will replace it with the alias-aware version.
-function normalize(name: string) {
+// Normalize a job title into a comparable key. Used for the
+// (company_id, normalized_title, location) job-uniqueness fallback. Company
+// names use the alias-aware normalizeCompanyName instead.
+function normalizeTitle(name: string) {
   return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// Partition direction tags into the legal subset (persisted) and rejected
+// names (surfaced via sources.evidence_snippet). Returning both halves lets
+// upsertCollectedLead emit the warning in the same transaction as the
+// company/source rows so a rollback drops the warning too.
+function partitionDirectionTags(tags: readonly string[] | undefined): {
+  accepted: string[];
+  rejected: string[];
+} {
+  if (!tags || tags.length === 0) return { accepted: [], rejected: [] };
+  const accepted: string[] = [];
+  const rejected: string[] = [];
+  for (const tag of tags) {
+    if (isDirectionTag(tag)) accepted.push(tag);
+    else rejected.push(tag);
+  }
+  return { accepted, rejected };
 }
 
 export function createSqliteLeadRepository(db: Database): LeadRepository {
@@ -47,18 +68,19 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
 
   const insertSource = db.prepare<
     { id: number },
-    [string, string | null, string | null, string]
+    [string, string | null, string | null, string, string | null]
   >(
-    "INSERT INTO sources (source_type, source_url, source_title, retrieved_at) VALUES (?, ?, ?, ?) RETURNING id",
+    `INSERT INTO sources (source_type, source_url, source_title, retrieved_at, evidence_snippet)
+     VALUES (?, ?, ?, ?, ?) RETURNING id`,
   );
 
   const insertCompany = db.prepare<
     { id: number },
-    [string, string, string | null, string | null, string, string]
+    [string, string, string | null, string | null, number, string, string]
   >(
     `INSERT INTO companies
-     (name, normalized_name, description, direction_tags, row_created_at, row_updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+     (name, normalized_name, description, direction_tags, needs_review, row_created_at, row_updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      RETURNING id`,
   );
 
@@ -72,12 +94,19 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
      RETURNING id`,
   );
 
-  // TB-1 minimal idempotency: step 1 of TB-4's 4-step dedupe rule (domain match).
-  // Steps 2-4 (normalized_name fallback, needs_review on multi-match) remain TB-4.
+  // Step 1 of the 4-step dedupe rule: an exact domain alias resolves to a
+  // known company. company_domains.domain is UNIQUE so at most one row.
   const selectCompanyByDomain = db.prepare<
     { company_id: number },
     [string]
   >("SELECT company_id FROM company_domains WHERE domain = ?");
+
+  // Step 2 / Step 4: which companies share a normalized_name. ≥2 rows means
+  // the spelling is ambiguous and the caller must NOT auto-merge.
+  const selectCompaniesByNormalizedName = db.prepare<
+    { id: number },
+    [string]
+  >("SELECT id FROM companies WHERE normalized_name = ?");
 
   const setPrimaryDomain = db.prepare<void, [number, string, number]>(
     "UPDATE companies SET primary_domain_id = ?, row_updated_at = ? WHERE id = ?",
@@ -233,14 +262,29 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
 
         insertEvent.run(runId, "candidate", null, now);
 
+        // Direction tags are validated up front so the warning, if any,
+        // travels with the source row created below.
+        // Warnings use a "warn:" prefix so future enrichers (TB-9/10) that
+        // want to record actual evidence text into the same column can grep
+        // and strip these without conflict. Multiple `warn:` lines may be
+        // appended in the future; for now there is exactly one channel.
+        const { accepted: acceptedTags, rejected: rejectedTags } =
+          partitionDirectionTags(lead.directionTags);
+        const evidenceSnippet =
+          rejectedTags.length === 0
+            ? null
+            : `warn:direction_tag_rejected: ${rejectedTags.join(", ")}`;
+
         const sourceRow = insertSource.get(
           lead.source.sourceType,
           lead.source.sourceUrl ?? null,
           lead.source.sourceTitle ?? null,
           lead.source.retrievedAt,
+          evidenceSnippet,
         );
         const sourceId = sourceRow!.id;
 
+        // ---- Step 1: domain match ----------------------------------------
         if (lead.domain) {
           const existing = selectCompanyByDomain.get(lead.domain);
           if (existing) {
@@ -249,11 +293,38 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
           }
         }
 
+        const normalizedName = normalizeCompanyName(lead.companyName);
+
+        // ---- Step 2 / Step 4: normalized_name lookup ---------------------
+        // Empty normalized_name (e.g. whitespace-only company name) is
+        // treated as "no match" — we never want every nameless lead to
+        // collide on "".
+        const nameMatches = normalizedName
+          ? selectCompaniesByNormalizedName.all(normalizedName)
+          : [];
+
+        if (nameMatches.length === 1) {
+          // Step 2: merge into the single existing row. New domain (if any)
+          // joins as a non-primary alias; we deliberately do NOT touch the
+          // existing primary_domain_id — the first domain to land is "real",
+          // later finds are aliases until a human says otherwise.
+          const existingId = nameMatches[0]!.id;
+          if (lead.domain) {
+            insertDomain.run(existingId, lead.domain, 0, sourceId, now);
+          }
+          insertEvent.run(runId, "deduped", existingId, now);
+          return { companyId: existingId, status: "deduped" };
+        }
+
+        // ---- Step 3 / Step 4: create new ---------------------------------
+        // Step 4 is "step 3 + needs_review=1". Both paths share the insert.
+        const needsReview = nameMatches.length >= 2 ? 1 : 0;
         const companyRow = insertCompany.get(
           lead.companyName,
-          normalize(lead.companyName),
+          normalizedName,
           lead.description ?? null,
-          lead.directionTags?.join(",") ?? null,
+          acceptedTags.length > 0 ? acceptedTags.join(",") : null,
+          needsReview,
           now,
           now,
         );
@@ -274,7 +345,7 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
           insertJob.run(
             companyId,
             job.title,
-            normalize(job.title),
+            normalizeTitle(job.title),
             job.jobUrl ?? null,
             job.location ?? null,
             job.remotePolicy ?? null,
