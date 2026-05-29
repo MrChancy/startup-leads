@@ -86,6 +86,7 @@ export const fakeCollector: Collector = {
         },
       },
     ];
-    return leads;
+    // Fake has no network and no parser, so both counters are exactly 0.
+    return { leads, parseFailed: 0, fetchFailed: 0 };
   },
 };

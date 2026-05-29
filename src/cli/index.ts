@@ -3,6 +3,7 @@ import { parseArgs, HELP_TEXT } from "./args.ts";
 import { runCollect } from "./collect.ts";
 import { runReport } from "./report.ts";
 import { fakeCollector } from "../collectors/fake.ts";
+import { hnCollector, HN_SOURCE } from "../collectors/hn/index.ts";
 import { openLeadRepository } from "../storage/index.ts";
 import { formatRunReport } from "../reporting/minimal.ts";
 import { getDatabasePath } from "../config/index.ts";
@@ -10,6 +11,7 @@ import type { Collector } from "../collectors/types.ts";
 
 const COLLECTORS: Record<string, Collector> = {
   fake: fakeCollector,
+  [HN_SOURCE]: hnCollector,
 };
 
 async function main() {

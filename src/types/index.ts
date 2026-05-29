@@ -109,6 +109,11 @@ export interface LeadRepository {
   finishRun(runId: string, status: RunStatus, errorSummary?: string): void;
   getRun(runId: string): RunRecord | null;
   upsertCollectedLead(lead: CollectedLead, runId: string): StoredLeadResult;
+  // Append a free-form event (e.g. "parse_failed", "fetch_failed") to the
+  // run. countByRun aggregates these into the matching RunCounts field.
+  // Reserved for collector-reported failures that don't map to a company id;
+  // upsertCollectedLead still owns "candidate"/"stored"/"deduped".
+  recordRunEvent(runId: string, eventType: string): void;
   countByRun(runId: string): RunCounts;
   writeLeadScore(score: LeadScoreRecord): void;
   // Wrap a block in a single SQLite transaction. Nested `db.transaction`

@@ -40,28 +40,32 @@ function makeLead(overrides: Partial<CollectedLead> = {}): CollectedLead {
 const fixtureCollector: Collector = {
   source: "fake-test",
   async collect() {
-    return [
-      makeLead(),
-      makeLead({
-        companyName: "Weak Co",
-        domain: "weak.co",
-        directionTags: ["overseas"],
-        jobs: [
-          {
-            title: "Sales Manager",
-            jobUrl: "https://weak.co/jobs/sales",
-            freshness: "unknown",
+    return {
+      leads: [
+        makeLead(),
+        makeLead({
+          companyName: "Weak Co",
+          domain: "weak.co",
+          directionTags: ["overseas"],
+          jobs: [
+            {
+              title: "Sales Manager",
+              jobUrl: "https://weak.co/jobs/sales",
+              freshness: "unknown",
+            },
+          ],
+          contacts: [],
+          source: {
+            sourceType: "fake-test",
+            sourceUrl: "fake://weak",
+            sourceTitle: "test",
+            retrievedAt: new Date().toISOString(),
           },
-        ],
-        contacts: [],
-        source: {
-          sourceType: "fake-test",
-          sourceUrl: "fake://weak",
-          sourceTitle: "test",
-          retrievedAt: new Date().toISOString(),
-        },
-      }),
-    ];
+        }),
+      ],
+      parseFailed: 0,
+      fetchFailed: 0,
+    };
   },
 };
 
@@ -113,6 +117,33 @@ test("runCollect rolls back the entire lead when writeLeadScore throws (H-2)", a
   expect(companies?.c).toBe(0);
   expect(jobs?.c).toBe(0);
   expect(scores?.c).toBe(0);
+});
+
+test("runCollect surfaces collector-reported parse_failed and fetch_failed counts", async () => {
+  // TB-3b: real collectors (HN, etc.) report failure counts in
+  // CollectorResult. The orchestrator must materialise those into
+  // run_lead_events rows so countByRun(runId) reflects them. Without this,
+  // the report would silently show 0 even when half the comments failed.
+  const failingCollector: Collector = {
+    source: "fake-failing",
+    async collect() {
+      return {
+        leads: [makeLead()],
+        parseFailed: 2,
+        fetchFailed: 1,
+      };
+    },
+  };
+  const { repo } = createInMemoryRepository();
+  const result = await runCollect({
+    repo,
+    collector: failingCollector,
+    limit: 50,
+  });
+  expect(result.counts.parseFailed).toBe(2);
+  expect(result.counts.fetchFailed).toBe(1);
+  // The lead itself still got upserted and scored.
+  expect(result.counts.stored).toBe(1);
 });
 
 test("runCollect skips scoring deduped leads (no new score row)", async () => {

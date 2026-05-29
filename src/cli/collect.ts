@@ -63,7 +63,19 @@ export async function runCollect(input: {
   const run = repo.startRun({ source: collector.source, limit });
 
   try {
-    const leads = await collector.collect({ limit });
+    const { leads, parseFailed, fetchFailed } = await collector.collect({
+      limit,
+    });
+    // Record collector-reported failures BEFORE any per-lead work so they
+    // attribute to the run even if a later upsert/scoring throw aborts the
+    // loop. The repo writes are tiny (one INSERT each) and outside the
+    // per-lead transaction so they survive a downstream rollback.
+    for (let i = 0; i < parseFailed; i++) {
+      repo.recordRunEvent(run.id, "parse_failed");
+    }
+    for (let i = 0; i < fetchFailed; i++) {
+      repo.recordRunEvent(run.id, "fetch_failed");
+    }
     const now = new Date();
     for (const lead of leads) {
       // pr-review H-2: upsert + scoring are wrapped in one transaction so

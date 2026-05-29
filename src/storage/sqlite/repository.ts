@@ -220,6 +220,13 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
       };
     },
 
+    recordRunEvent(runId, eventType) {
+      // company_id is null because these collector-reported failures (a
+      // parse error on a discarded HN comment, a Firebase fetch that
+      // exhausted retries) never produced a company row to point at.
+      insertEvent.run(runId, eventType, null, new Date().toISOString());
+    },
+
     upsertCollectedLead: db.transaction(
       (lead: CollectedLead, runId: string): StoredLeadResult => {
         const now = new Date().toISOString();
