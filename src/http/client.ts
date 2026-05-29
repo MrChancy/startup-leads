@@ -9,6 +9,11 @@
 
 import pkg from "../../package.json" with { type: "json" };
 import type { HttpClient, HttpOptions, HttpResponse } from "./types.ts";
+import {
+  HttpError,
+  HttpRetryExhaustedError,
+  HttpTimeoutError,
+} from "./types.ts";
 
 const DEFAULT_USER_AGENT = `startup-leads/${pkg.version} (+local research tool)`;
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -23,7 +28,9 @@ const QPS_ENV_VAR = "STARTUP_LEADS_HTTP_QPS";
 // surrounding promise can settle and any allocated timer is cleared.
 export type Sleep = (ms: number, signal?: AbortSignal) => Promise<void>;
 export type Now = () => number;
-export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
+// `init` mirrors `globalThis.fetch` (optional) so wrapping the platform fetch
+// doesn't require a widening cast. Internal call sites always pass init.
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 export interface HttpClientDeps {
   fetch?: FetchLike;
@@ -34,7 +41,7 @@ export interface HttpClientDeps {
 }
 
 export function createHttpClient(deps: HttpClientDeps = {}): HttpClient {
-  const fetchImpl = deps.fetch ?? (globalThis.fetch as FetchLike);
+  const fetchImpl: FetchLike = deps.fetch ?? globalThis.fetch;
   const sleep = deps.sleep ?? defaultSleep;
   const now = deps.now ?? Date.now;
   const env = deps.env ?? process.env;
@@ -64,12 +71,21 @@ export function createHttpClient(deps: HttpClientDeps = {}): HttpClient {
         };
       }
 
-      if (!isRetryable(response.status) || attempt === MAX_RETRIES) {
-        throw await toHttpError(url, response);
+      const retryable = isRetryable(response.status);
+      const body = await response.text().catch(() => "");
+
+      if (!retryable) {
+        throw new HttpError(url, response.status, body);
+      }
+      if (attempt === MAX_RETRIES) {
+        throw new HttpRetryExhaustedError(
+          url,
+          MAX_RETRIES + 1,
+          response.status,
+          body,
+        );
       }
 
-      // Drain the body before retrying so we don't leak the connection.
-      await response.text().catch(() => undefined);
       const delay = BACKOFF_MS[attempt] ?? BACKOFF_MS[BACKOFF_MS.length - 1]!;
       await sleep(delay);
     }
@@ -83,14 +99,6 @@ export function createHttpClient(deps: HttpClientDeps = {}): HttpClient {
 
 function isRetryable(status: number): boolean {
   return status === 429 || (status >= 500 && status < 600);
-}
-
-async function toHttpError(url: string, response: Response): Promise<Error> {
-  const body = await response.text().catch(() => "");
-  const snippet = body.length > 200 ? `${body.slice(0, 200)}...` : body;
-  return new Error(
-    `HTTP ${response.status} ${response.statusText} from ${url}${snippet ? `: ${snippet}` : ""}`,
-  );
 }
 
 // Per CLAUDE.local.md A-3: distinguish "env var absent" (fall back to
@@ -164,7 +172,7 @@ async function fetchWithTimeout(
     return await fetchImpl(url, { method: "GET", headers, signal: abortFetch.signal });
   } catch (err) {
     if (timedOut) {
-      throw new Error(`Request to ${url} timed out after ${timeoutMs}ms`);
+      throw new HttpTimeoutError(url, timeoutMs);
     }
     throw err;
   } finally {

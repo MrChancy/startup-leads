@@ -5,7 +5,7 @@
 
 export interface FetchCall {
   url: string;
-  init: RequestInit;
+  init: RequestInit | undefined;
   headers: Record<string, string>;
 }
 
@@ -16,7 +16,7 @@ export interface ScriptedResponse {
 }
 
 export interface FakeFetch {
-  fn: (input: string, init: RequestInit) => Promise<Response>;
+  fn: (input: string, init?: RequestInit) => Promise<Response>;
   calls: FetchCall[];
 }
 
@@ -26,8 +26,8 @@ export interface FakeFetch {
 export function createFakeFetch(responses: ScriptedResponse[]): FakeFetch {
   const calls: FetchCall[] = [];
   let i = 0;
-  const fn = async (input: string, init: RequestInit): Promise<Response> => {
-    calls.push({ url: input, init, headers: extractHeaders(init.headers) });
+  const fn = async (input: string, init?: RequestInit): Promise<Response> => {
+    calls.push({ url: input, init, headers: extractHeaders(init?.headers) });
     const scripted = responses[i++];
     if (!scripted) {
       throw new Error(`fake fetch: no scripted response for call #${i} (${input})`);
@@ -53,7 +53,6 @@ export interface FakeClock {
 interface Waiter {
   until: number;
   resolve: () => void;
-  cancel?: () => void;
 }
 
 // Virtual clock + queueable sleep. `sleep(ms)` returns a promise that

@@ -5,6 +5,11 @@
 
 export type { HttpClient, HttpOptions, HttpResponse } from "./types.ts";
 export {
+  HttpError,
+  HttpRetryExhaustedError,
+  HttpTimeoutError,
+} from "./types.ts";
+export {
   createHttpClient,
   type HttpClientDeps,
   type FetchLike,

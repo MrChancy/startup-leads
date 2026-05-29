@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import pkg from "../../package.json" with { type: "json" };
 import { createHttpClient } from "./client.ts";
 import type { HttpClient } from "./types.ts";
+import { HttpError, HttpRetryExhaustedError, HttpTimeoutError } from "./types.ts";
 import { createFakeClock, createFakeFetch, flushMicrotasks } from "./test-support.ts";
 
 test("createHttpClient returns an HttpClient with a get method", () => {
@@ -225,8 +226,8 @@ test("get aborts the fetch after the default 10s timeout", async () => {
   // can settle it. If the client doesn't time out, the test hangs (and
   // bun:test will eventually fail it).
   const aborts: AbortSignal[] = [];
-  const fetchImpl = (_url: string, init: RequestInit) => {
-    const signal = init.signal!;
+  const fetchImpl = (_url: string, init?: RequestInit) => {
+    const signal = init!.signal!;
     aborts.push(signal);
     return new Promise<Response>((_resolve, reject) => {
       signal.addEventListener("abort", () => {
@@ -273,4 +274,130 @@ test("get sends the default User-Agent built from the package version", async ()
   expect(fetch.calls[0]!.headers["User-Agent"]).toBe(
     `startup-leads/${pkg.version} (+local research tool)`,
   );
+});
+
+test("non-retryable 4xx throws a typed HttpError carrying status / url / body", async () => {
+  const fetch = createFakeFetch([{ status: 404, body: "missing resource" }]);
+  const clock = createFakeClock();
+  const client = createHttpClient({
+    fetch: fetch.fn,
+    sleep: clock.sleep,
+    now: clock.now,
+    env: {},
+  });
+
+  let caught: unknown;
+  try {
+    await client.get("https://example.com/missing");
+  } catch (err) {
+    caught = err;
+  }
+
+  expect(caught).toBeInstanceOf(HttpError);
+  expect(caught).not.toBeInstanceOf(HttpRetryExhaustedError);
+  expect(caught).not.toBeInstanceOf(HttpTimeoutError);
+  const httpErr = caught as HttpError;
+  expect(httpErr.status).toBe(404);
+  expect(httpErr.url).toBe("https://example.com/missing");
+  expect(httpErr.body).toBe("missing resource");
+});
+
+test("retry-exhausted throws HttpRetryExhaustedError with attempts and lastStatus", async () => {
+  const fetch = createFakeFetch([
+    { status: 429, body: "" },
+    { status: 503, body: "" },
+    { status: 429, body: "" },
+    { status: 503, body: "still down" },
+  ]);
+  const clock = createFakeClock();
+  const client = createHttpClient({
+    fetch: fetch.fn,
+    sleep: clock.sleep,
+    now: clock.now,
+    env: {},
+  });
+
+  const promise = client.get("https://example.com/rate-limited");
+  // Advance enough total time to clear every backoff + limiter wait.
+  for (let i = 0; i < 8; i++) {
+    clock.advance(10_000);
+    await flushMicrotasks();
+  }
+
+  let caught: unknown;
+  try {
+    await promise;
+  } catch (err) {
+    caught = err;
+  }
+
+  expect(caught).toBeInstanceOf(HttpRetryExhaustedError);
+  expect(caught).toBeInstanceOf(HttpError); // RetryExhausted extends HttpError
+  const exhausted = caught as HttpRetryExhaustedError;
+  expect(exhausted.attempts).toBe(4); // 1 initial + 3 retries
+  expect(exhausted.lastStatus).toBe(503);
+  expect(exhausted.url).toBe("https://example.com/rate-limited");
+  expect(exhausted.body).toBe("still down");
+});
+
+test("timeout throws a typed HttpTimeoutError with url and timeoutMs", async () => {
+  const clock = createFakeClock();
+  // Fetch that never resolves on its own — rejects only when its signal aborts.
+  const fetchImpl = (_url: string, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init!.signal!.addEventListener("abort", () => {
+        reject(new DOMException("aborted", "AbortError"));
+      });
+    });
+  const client = createHttpClient({
+    fetch: fetchImpl,
+    sleep: clock.sleep,
+    now: clock.now,
+    env: {},
+  });
+
+  const promise = client.get("https://example.com/slow");
+  await flushMicrotasks();
+  clock.advance(10_000);
+
+  let caught: unknown;
+  try {
+    await promise;
+  } catch (err) {
+    caught = err;
+  }
+
+  expect(caught).toBeInstanceOf(HttpTimeoutError);
+  expect(caught).not.toBeInstanceOf(HttpError);
+  const timeoutErr = caught as HttpTimeoutError;
+  expect(timeoutErr.url).toBe("https://example.com/slow");
+  expect(timeoutErr.timeoutMs).toBe(10_000);
+});
+
+test("STARTUP_LEADS_HTTP_QPS rejects negative values explicitly (regression for A-3)", () => {
+  expect(() =>
+    createHttpClient({ env: { STARTUP_LEADS_HTTP_QPS: "-1" } }),
+  ).toThrow(/STARTUP_LEADS_HTTP_QPS/);
+  expect(() =>
+    createHttpClient({ env: { STARTUP_LEADS_HTTP_QPS: "-0.5" } }),
+  ).toThrow(/STARTUP_LEADS_HTTP_QPS/);
+});
+
+test("caller-supplied User-Agent overrides the default", async () => {
+  // Locks in the current contract: opts.headers wins. Spec says "默认 UA";
+  // making the default un-overridable would break per-collector identification.
+  const fetch = createFakeFetch([{ status: 200, body: "" }]);
+  const clock = createFakeClock();
+  const client = createHttpClient({
+    fetch: fetch.fn,
+    sleep: clock.sleep,
+    now: clock.now,
+    env: {},
+  });
+
+  await client.get("https://example.com/", {
+    headers: { "User-Agent": "tb-3b-hn/0.1" },
+  });
+
+  expect(fetch.calls[0]!.headers["User-Agent"]).toBe("tb-3b-hn/0.1");
 });
