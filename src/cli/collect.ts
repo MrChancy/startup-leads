@@ -110,13 +110,22 @@ export async function runCollect(input: {
           });
         });
       } catch (perLeadErr) {
-        // Per-lead failure: tx rolled back, no orphan rows. Record the
-        // failure on the run so countByRun surfaces it; do NOT re-throw —
-        // the next lead might still be fine.
-        void perLeadErr;
+        // Per-lead failure: inner tx already rolled back, no orphan rows.
+        // Surface to stderr so operators see the underlying message — silent
+        // counters were the L-6 finding on PR #5. Then record on the run so
+        // countByRun reports parse_failed; do NOT re-throw, the next lead
+        // might still be fine.
+        const msg =
+          perLeadErr instanceof Error ? perLeadErr.message : String(perLeadErr);
+        process.stderr.write(`collect: lead failed — ${msg}\n`);
         repo.recordRunEvent(run.id, "parse_failed");
       }
     }
+    // Note (M-5): when a per-lead tx rolls back, the `candidate` event it
+    // emitted is also undone. countByRun therefore reports
+    // `candidates = stored + deduped` (no failed leads), and `parse_failed`
+    // tracks the failures separately. This is intentional: "candidates"
+    // counts what made it past the storage gate, not raw collector output.
     repo.finishRun(run.id, "completed");
   } catch (err) {
     repo.finishRun(

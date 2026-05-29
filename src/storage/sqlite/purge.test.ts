@@ -193,6 +193,35 @@ test("purgeOlderThan keeps a recent company even when its children are old", () 
   expect(tableCount(db, "contacts")).toBe(0);
 });
 
+test("purgeOlderThan deletes a company that has a lead_scores row (H-1 regression)", () => {
+  // pr-review H-1: every collected company gets a lead_scores row in the
+  // real CLI flow. The previous predicate refused to delete any company
+  // with lead_scores → PIPL "delete on request" intent silently broken.
+  // After the fix, lead_scores + push_events cascade with the company.
+  const { repo, db } = createInMemoryRepository();
+  const run = repo.startRun({ source: "fake", limit: 1 });
+  const stored = repo.upsertCollectedLead(leadOf(), run.id);
+  insertScoreRow(repo, stored.companyId, run.id);
+
+  const old = "2020-01-01T00:00:00.000Z";
+  backdateCompany(db, stored.companyId, old);
+  backdateJobs(db, stored.companyId, old);
+  backdateContacts(db, stored.companyId, old);
+
+  const result = repo.purgeOlderThan("2024-01-01T00:00:00.000Z");
+  expect(result.companies).toBe(1);
+  expect(result.lead_scores).toBe(1);
+
+  const remainingCompanies = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM companies")
+    .get();
+  expect(remainingCompanies?.c).toBe(0);
+  const remainingScores = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM lead_scores")
+    .get();
+  expect(remainingScores?.c).toBe(0);
+});
+
 test("purgeOlderThan is idempotent (second run deletes nothing)", () => {
   const { repo, db } = createInMemoryRepository();
   const run = repo.startRun({ source: "fake", limit: 1 });
@@ -314,6 +343,37 @@ test("purgeCompany removes company and dependents but preserves sources", () => 
   expect(tableCount(db, "push_events")).toBe(0);
   // sources is audit-only — never touched.
   expect(tableCount(db, "sources")).toBe(sourcesBefore);
+});
+
+test("purgeCompany lets run_lead_events.company_id cascade to NULL (M-4 audit invariant)", () => {
+  // The run_lead_events FK is ON DELETE SET NULL: we want the candidate /
+  // stored events the company produced to survive in run history (so
+  // `report --run <id>` is still meaningful) — but with no dangling FK.
+  const { repo, db } = createInMemoryRepository();
+  const run = repo.startRun({ source: "fake", limit: 1 });
+  const stored = repo.upsertCollectedLead(leadOf(), run.id);
+  const eventsBefore = db
+    .query<{ c: number }, [number]>(
+      "SELECT COUNT(*) AS c FROM run_lead_events WHERE company_id = ?",
+    )
+    .get(stored.companyId);
+  expect(eventsBefore?.c).toBeGreaterThan(0);
+
+  repo.purgeCompany("acme.ai");
+
+  // Events still exist (history preserved); their company_id is NULL.
+  const eventsAfter = db
+    .query<{ c: number }, []>(
+      "SELECT COUNT(*) AS c FROM run_lead_events WHERE company_id IS NULL",
+    )
+    .get();
+  expect(eventsAfter?.c).toBeGreaterThanOrEqual(eventsBefore?.c ?? 0);
+  const orphans = db
+    .query<{ c: number }, [number]>(
+      "SELECT COUNT(*) AS c FROM run_lead_events WHERE company_id = ?",
+    )
+    .get(stored.companyId);
+  expect(orphans?.c).toBe(0);
 });
 
 test("purgeCompany is idempotent (second run = all zeros)", () => {

@@ -46,15 +46,37 @@ function deleteOne(db: Database, sql: string, params: Param[]): number {
 // ----- older-than ----------------------------------------------------------
 
 // "Old company" eligibility: company itself is old AND has no remaining
-// children referencing it. We evaluate this AFTER the contact / job deletes
-// so a company whose dependents we just removed becomes eligible.
+// JOBS or CONTACTS. We evaluate this AFTER the contact / job deletes so a
+// company whose dependents we just removed becomes eligible.
+//
+// We do NOT gate on lead_scores / push_events presence. Per spec PIPL
+// posture, "deleting the company" means the audit + scoring history goes
+// too — we explicitly delete them by company_id below so PurgeCounts stays
+// honest (rather than relying on schema ON DELETE CASCADE, which would not
+// surface a count to the user). pr-review #24 H-1 fix.
 const OLD_COMPANY_WHERE = `
   companies
   WHERE companies.row_updated_at < ?
-    AND NOT EXISTS (SELECT 1 FROM jobs        WHERE company_id = companies.id)
-    AND NOT EXISTS (SELECT 1 FROM contacts    WHERE company_id = companies.id)
-    AND NOT EXISTS (SELECT 1 FROM lead_scores WHERE company_id = companies.id)
-    AND NOT EXISTS (SELECT 1 FROM push_events WHERE company_id = companies.id)
+    AND NOT EXISTS (SELECT 1 FROM jobs     WHERE company_id = companies.id)
+    AND NOT EXISTS (SELECT 1 FROM contacts WHERE company_id = companies.id)
+`;
+
+// Predicate shared by every "is this company eligible after the cascade"
+// count. After the contact / job deletes, an eligible company is one whose
+// row_updated_at < cutoff and that has NO FRESH children remaining.
+// lead_scores and push_events presence does NOT block eligibility — they
+// are audit/scoring history that travels with the company per spec PIPL.
+const ELIGIBLE_COMPANY_SUBQUERY = `
+  SELECT id FROM companies
+  WHERE row_updated_at < ?
+    AND NOT EXISTS (
+      SELECT 1 FROM jobs
+      WHERE company_id = companies.id AND row_updated_at >= ?
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM contacts
+      WHERE company_id = companies.id AND row_updated_at >= ?
+    )
 `;
 
 export function previewPurgeOlderThan(
@@ -63,50 +85,26 @@ export function previewPurgeOlderThan(
 ): PurgeCounts {
   const contacts = countOne(db, "contacts WHERE row_updated_at < ?", [cutoff]);
   const jobs = countOne(db, "jobs WHERE row_updated_at < ?", [cutoff]);
-  // Preview must report counts *as if* the cascade has already happened, so
-  // we count companies that will be eligible after the contact + job deletes
-  // — i.e. their only remaining children would be exactly the ones we just
-  // counted to delete.
+  // Preview counts "what will be deleted *after* the cascade", so we count
+  // companies that will be eligible after the contact + job deletes.
   const companies = countOne(
     db,
-    `
-    companies
-    WHERE companies.row_updated_at < ?
-      AND NOT EXISTS (
-        SELECT 1 FROM jobs
-        WHERE company_id = companies.id AND row_updated_at >= ?
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM contacts
-        WHERE company_id = companies.id AND row_updated_at >= ?
-      )
-      AND NOT EXISTS (SELECT 1 FROM lead_scores WHERE company_id = companies.id)
-      AND NOT EXISTS (SELECT 1 FROM push_events WHERE company_id = companies.id)
-    `,
+    `companies WHERE id IN (${ELIGIBLE_COMPANY_SUBQUERY})`,
     [cutoff, cutoff, cutoff],
   );
-  // company_domains rows die when their company is deleted (ON DELETE
-  // CASCADE). Counting "rows belonging to those companies" gives the user
-  // the right number without us doing the cascade math twice.
   const company_domains = countOne(
     db,
-    `
-    company_domains
-    WHERE company_id IN (
-      SELECT id FROM companies
-      WHERE row_updated_at < ?
-        AND NOT EXISTS (
-          SELECT 1 FROM jobs
-          WHERE company_id = companies.id AND row_updated_at >= ?
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM contacts
-          WHERE company_id = companies.id AND row_updated_at >= ?
-        )
-        AND NOT EXISTS (SELECT 1 FROM lead_scores WHERE company_id = companies.id)
-        AND NOT EXISTS (SELECT 1 FROM push_events WHERE company_id = companies.id)
-    )
-    `,
+    `company_domains WHERE company_id IN (${ELIGIBLE_COMPANY_SUBQUERY})`,
+    [cutoff, cutoff, cutoff],
+  );
+  const lead_scores = countOne(
+    db,
+    `lead_scores WHERE company_id IN (${ELIGIBLE_COMPANY_SUBQUERY})`,
+    [cutoff, cutoff, cutoff],
+  );
+  const push_events = countOne(
+    db,
+    `push_events WHERE company_id IN (${ELIGIBLE_COMPANY_SUBQUERY})`,
     [cutoff, cutoff, cutoff],
   );
   return {
@@ -115,6 +113,8 @@ export function previewPurgeOlderThan(
     jobs,
     companies,
     company_domains,
+    lead_scores,
+    push_events,
   };
 }
 
@@ -124,20 +124,34 @@ export function purgeOlderThan(db: Database, cutoff: string): PurgeCounts {
   return db.transaction((): PurgeCounts => {
     const contacts = deleteOne(db, "contacts WHERE row_updated_at < ?", [cutoff]);
     const jobs = deleteOne(db, "jobs WHERE row_updated_at < ?", [cutoff]);
-    // company_domains will cascade when companies go, but we capture the
-    // count first so the return shape is honest. Doing it as a separate
-    // DELETE (instead of "look at companies' cascades") also keeps the count
-    // accurate when a future schema change loosens that FK.
+    // Delete every child of eligible companies explicitly so PurgeCounts
+    // matches the user's mental model. The schema's ON DELETE CASCADE
+    // would also do it but we'd lose the per-table count.
+    const lead_scores = deleteOne(
+      db,
+      `lead_scores WHERE company_id IN (${ELIGIBLE_COMPANY_SUBQUERY})`,
+      [cutoff, cutoff, cutoff],
+    );
+    const push_events = deleteOne(
+      db,
+      `push_events WHERE company_id IN (${ELIGIBLE_COMPANY_SUBQUERY})`,
+      [cutoff, cutoff, cutoff],
+    );
     const company_domains = deleteOne(
       db,
-      `
-      company_domains
-      WHERE company_id IN (SELECT id FROM ${OLD_COMPANY_WHERE.trim()})
-      `,
+      `company_domains WHERE company_id IN (SELECT id FROM ${OLD_COMPANY_WHERE.trim()})`,
       [cutoff],
     );
     const companies = deleteOne(db, OLD_COMPANY_WHERE, [cutoff]);
-    return { ...EMPTY_COUNTS, contacts, jobs, company_domains, companies };
+    return {
+      ...EMPTY_COUNTS,
+      contacts,
+      jobs,
+      company_domains,
+      companies,
+      lead_scores,
+      push_events,
+    };
   })();
 }
 
@@ -234,9 +248,10 @@ export function purgeCompany(db: Database, domain: string): PurgeCounts {
       "company_domains WHERE company_id = ?",
       [companyId],
     );
-    // Null out the company's primary_domain_id pointer first so the
-    // subsequent companies DELETE doesn't trip a stale FK reference on
-    // databases that may grow tighter constraints later.
+    // companies.primary_domain_id is a plain INTEGER (no FK in 001_init.sql),
+    // so deleting the company doesn't trip any constraint on the now-orphaned
+    // pointer. If a future migration adds a real FK, we'll need an UPDATE
+    // companies SET primary_domain_id = NULL here first.
     const companies = deleteOne(db, "companies WHERE id = ?", [companyId]);
     return {
       companies,
