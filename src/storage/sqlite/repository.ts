@@ -7,11 +7,21 @@ import type {
   DecisionCounts,
   LeadRepository,
   LeadScoreRecord,
+  PurgeCounts,
+  RiskLevel,
   RunCounts,
   RunRecord,
   RunStatus,
   StoredLeadResult,
 } from "../../types/index.ts";
+import {
+  previewPurgeCompany as previewPurgeCompanySql,
+  previewPurgeContactsByRisk as previewPurgeContactsByRiskSql,
+  previewPurgeOlderThan as previewPurgeOlderThanSql,
+  purgeCompany as purgeCompanySql,
+  purgeContactsByRisk as purgeContactsByRiskSql,
+  purgeOlderThan as purgeOlderThanSql,
+} from "./purge.ts";
 
 // Normalize a job title into a comparable key. Used for the
 // (company_id, normalized_title, location) job-uniqueness fallback. Company
@@ -260,20 +270,43 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
       (lead: CollectedLead, runId: string): StoredLeadResult => {
         const now = new Date().toISOString();
 
+        // Reject leads with no retrieval timestamp BEFORE we write anything.
+        // The spec ("contacts.source_id / retrieved_at non-null") means a
+        // contact must reference a source that has retrieved_at; the cleanest
+        // way to enforce that without a column on contacts is to demand the
+        // source row arrive valid. Throwing here surfaces as parse_failed in
+        // runCollect's per-lead try block.
+        if (!lead.source.retrievedAt || lead.source.retrievedAt.length === 0) {
+          throw new Error(
+            "rejected lead: source.retrievedAt is empty (every contact must " +
+              "trace back to a timestamped source)",
+          );
+        }
+
         insertEvent.run(runId, "candidate", null, now);
 
-        // Direction tags are validated up front so the warning, if any,
-        // travels with the source row created below.
+        // Direction tags AND blocked contacts are validated up front so any
+        // warnings travel with the source row created below.
         // Warnings use a "warn:" prefix so future enrichers (TB-9/10) that
         // want to record actual evidence text into the same column can grep
-        // and strip these without conflict. Multiple `warn:` lines may be
-        // appended in the future; for now there is exactly one channel.
+        // and strip these without conflict. Multiple `warn:` lines join with
+        // `\n` so each channel stays grep-able as a single line.
         const { accepted: acceptedTags, rejected: rejectedTags } =
           partitionDirectionTags(lead.directionTags);
-        const evidenceSnippet =
-          rejectedTags.length === 0
-            ? null
-            : `warn:direction_tag_rejected: ${rejectedTags.join(", ")}`;
+        const blockedContactCount = lead.contacts.reduce(
+          (n, c) => (c.riskLevel === "blocked" ? n + 1 : n),
+          0,
+        );
+        const warnings: string[] = [];
+        if (rejectedTags.length > 0) {
+          warnings.push(
+            `warn:direction_tag_rejected: ${rejectedTags.join(", ")}`,
+          );
+        }
+        if (blockedContactCount > 0) {
+          warnings.push(`warn:blocked_contact_rejected: ${blockedContactCount}`);
+        }
+        const evidenceSnippet = warnings.length === 0 ? null : warnings.join("\n");
 
         const sourceRow = insertSource.get(
           lead.source.sourceType,
@@ -444,6 +477,27 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
         }
       }
       return counts;
+    },
+
+    previewPurgeOlderThan(cutoff: string): PurgeCounts {
+      return previewPurgeOlderThanSql(db, cutoff);
+    },
+    previewPurgeContactsByRisk(
+      levels: ReadonlyArray<RiskLevel>,
+    ): PurgeCounts {
+      return previewPurgeContactsByRiskSql(db, levels);
+    },
+    previewPurgeCompany(domain: string): PurgeCounts {
+      return previewPurgeCompanySql(db, domain);
+    },
+    purgeOlderThan(cutoff: string): PurgeCounts {
+      return purgeOlderThanSql(db, cutoff);
+    },
+    purgeContactsByRisk(levels: ReadonlyArray<RiskLevel>): PurgeCounts {
+      return purgeContactsByRiskSql(db, levels);
+    },
+    purgeCompany(domain: string): PurgeCounts {
+      return purgeCompanySql(db, domain);
     },
 
     countByRun(runId): RunCounts {

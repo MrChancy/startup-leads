@@ -83,28 +83,39 @@ export async function runCollect(input: {
       // the input) rolls back the company / domain / source / events too —
       // no permanent "stored without a score" orphans. Nested SAVEPOINTs
       // mean the inner upsertCollectedLead tx still works.
-      repo.withTransaction(() => {
-        const stored = repo.upsertCollectedLead(lead, run.id);
-        // Skip scoring on dedupe: the existing company already has its
-        // most recent scoring snapshot from the previous run, and
-        // re-scoring would duplicate audit rows without new evidence.
-        if (stored.status === "deduped") return;
-        const scoreInput = toScoreInput(lead, stored.companyId, now);
-        const result = scoreCompany(scoreInput);
-        repo.writeLeadScore({
-          companyId: result.companyId,
-          runId: run.id,
-          score: result.score,
-          jobMatchScore: result.jobMatchScore,
-          directionScore: result.directionScore,
-          freshnessScore: result.freshnessScore,
-          contactScore: result.contactScore,
-          actionabilityScore: result.actionabilityScore,
-          matchReason: result.matchReason,
-          decision: result.decision,
-          scorerVersion: result.scorerVersion,
+      // TB-12: per-lead errors (e.g. empty source.retrievedAt) get recorded
+      // as parse_failed and the loop continues. A single bad collector
+      // payload shouldn't abort the whole run.
+      try {
+        repo.withTransaction(() => {
+          const stored = repo.upsertCollectedLead(lead, run.id);
+          // Skip scoring on dedupe: the existing company already has its
+          // most recent scoring snapshot from the previous run, and
+          // re-scoring would duplicate audit rows without new evidence.
+          if (stored.status === "deduped") return;
+          const scoreInput = toScoreInput(lead, stored.companyId, now);
+          const result = scoreCompany(scoreInput);
+          repo.writeLeadScore({
+            companyId: result.companyId,
+            runId: run.id,
+            score: result.score,
+            jobMatchScore: result.jobMatchScore,
+            directionScore: result.directionScore,
+            freshnessScore: result.freshnessScore,
+            contactScore: result.contactScore,
+            actionabilityScore: result.actionabilityScore,
+            matchReason: result.matchReason,
+            decision: result.decision,
+            scorerVersion: result.scorerVersion,
+          });
         });
-      });
+      } catch (perLeadErr) {
+        // Per-lead failure: tx rolled back, no orphan rows. Record the
+        // failure on the run so countByRun surfaces it; do NOT re-throw —
+        // the next lead might still be fine.
+        void perLeadErr;
+        repo.recordRunEvent(run.id, "parse_failed");
+      }
     }
     repo.finishRun(run.id, "completed");
   } catch (err) {

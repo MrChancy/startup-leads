@@ -89,6 +89,9 @@ test("runCollect rolls back the entire lead when writeLeadScore throws (H-2)", a
   // pr-review H-2: upsert + score must be co-transactional. A failing
   // writeLeadScore would otherwise leave the company / domain / source
   // committed and dedupe-skip on every subsequent run — permanent split-brain.
+  // TB-12: per-lead failures are now absorbed (counted as parse_failed) so
+  // one bad lead doesn't abort the whole run. The rollback invariant still
+  // holds — no orphan rows survive.
   const { repo, db } = createInMemoryRepository();
   const failingRepo = {
     ...repo,
@@ -97,13 +100,11 @@ test("runCollect rolls back the entire lead when writeLeadScore throws (H-2)", a
     },
   };
 
-  await expect(
-    runCollect({
-      repo: failingRepo,
-      collector: fixtureCollector,
-      limit: 50,
-    }),
-  ).rejects.toThrow(/simulated score writer failure/);
+  const result = await runCollect({
+    repo: failingRepo,
+    collector: fixtureCollector,
+    limit: 50,
+  });
 
   const companies = db
     .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM companies")
@@ -117,6 +118,9 @@ test("runCollect rolls back the entire lead when writeLeadScore throws (H-2)", a
   expect(companies?.c).toBe(0);
   expect(jobs?.c).toBe(0);
   expect(scores?.c).toBe(0);
+  // Failing leads are reported as parse_failed, not silently lost.
+  expect(result.counts.parseFailed).toBeGreaterThan(0);
+  expect(result.counts.stored).toBe(0);
 });
 
 test("runCollect surfaces collector-reported parse_failed and fetch_failed counts", async () => {

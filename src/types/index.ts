@@ -104,6 +104,23 @@ export interface DecisionCounts {
   excludedByRule: number;
 }
 
+// Row counts touched (or that would be touched in preview) by a purge call.
+// Keys mirror SQLite table names so CLI output / aggregations can iterate
+// without a separate name map. `sources` is always 0 — purge never deletes
+// audit rows (FK is ON DELETE SET NULL), but it's listed so the field
+// shape is identical between preview and real-delete output.
+export interface PurgeCounts {
+  companies: number;
+  company_domains: number;
+  jobs: number;
+  contacts: number;
+  sources: number;
+  lead_scores: number;
+  push_events: number;
+}
+
+export type RiskLevel = "low" | "medium" | "high" | "blocked";
+
 export interface LeadRepository {
   startRun(input: { source: string; limit: number }): RunRecord;
   finishRun(runId: string, status: RunStatus, errorSummary?: string): void;
@@ -123,4 +140,15 @@ export interface LeadRepository {
   withTransaction<T>(fn: () => T): T;
   // Reads back the most recent score row per company seen in the run.
   countDecisionsByRun(runId: string): DecisionCounts;
+
+  // TB-12 purge. preview methods are pure reads (no transaction needed) and
+  // share predicate SQL with the matching real-delete methods so they can
+  // never drift. Real-delete methods are wrapped in a single SQLite
+  // transaction so a downstream FK violation rolls back the whole purge.
+  previewPurgeOlderThan(cutoff: string): PurgeCounts;
+  previewPurgeContactsByRisk(levels: ReadonlyArray<RiskLevel>): PurgeCounts;
+  previewPurgeCompany(domain: string): PurgeCounts;
+  purgeOlderThan(cutoff: string): PurgeCounts;
+  purgeContactsByRisk(levels: ReadonlyArray<RiskLevel>): PurgeCounts;
+  purgeCompany(domain: string): PurgeCounts;
 }
