@@ -1,6 +1,36 @@
 import { test, expect } from "bun:test";
-import { parseComment, type FirebaseCommentItem } from "./parse.ts";
+import {
+  normalizeForDomain,
+  parseComment,
+  type FirebaseCommentItem,
+} from "./parse.ts";
 import { loadFixture } from "./test-support.ts";
+
+// --- normalizeForDomain — issue #25 CJK collision fix ----------------------
+
+test("normalizeForDomain ASCII names go through the strip path unchanged", () => {
+  expect(normalizeForDomain("ByteDance")).toBe("bytedance");
+  expect(normalizeForDomain("Acme  AI!")).toBe("acme-ai");
+});
+
+test("normalizeForDomain all-CJK names produce a non-empty deterministic key (issue #25)", () => {
+  // Before #25: every all-CJK name → "" → domain="hn:" → step 1 silently
+  // merged unrelated companies. After: distinct names → distinct hash keys.
+  const a = normalizeForDomain("字节跳动");
+  const b = normalizeForDomain("智谱");
+  expect(a).not.toBe("");
+  expect(b).not.toBe("");
+  expect(a).not.toBe(b);
+  // Same input must always produce the same key (S-3 idempotency).
+  expect(normalizeForDomain("字节跳动")).toBe(a);
+});
+
+test("normalizeForDomain all-punctuation names also fall back to a hash, not empty", () => {
+  // Same defect class as the CJK case: stripped string is "". TB-3b
+  // follow-up #23 L4 documented the empty collision.
+  expect(normalizeForDomain("!!!")).not.toBe("");
+  expect(normalizeForDomain("!!!")).not.toBe(normalizeForDomain("???"));
+});
 
 // Deterministic "now" used to bucket freshness in every parser test. Picked
 // to be > Fixture C's 60-day-old timestamp so that comment lands in usable

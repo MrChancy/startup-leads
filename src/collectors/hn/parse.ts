@@ -16,6 +16,7 @@
 //     the most common community conventions, not arbitrary NLP. Coverage
 //     is "5 fixtures, 5 formats" per the AC, not "every comment ever".
 
+import { createHash } from "node:crypto";
 import type {
   CollectedContact,
   CollectedLead,
@@ -158,11 +159,23 @@ function decodeHtmlEntities(input: string): string {
 // Build the "domain" suffix for the synthetic hn:<name> dedup key. Lower
 // case, whitespace collapsed to `-`, anything non-alphanumeric dropped so
 // two cosmetic variants ("Acme AI" vs "Acme  AI!") still collide.
-function normalizeForDomain(name: string): string {
-  return name
+//
+// For all-CJK (or any name with no ASCII alphanumerics), the strip would
+// produce "" and EVERY such company would land on `hn:` → step 1 of TB-4's
+// dedupe rule would silently merge unrelated companies. Fix #25: fall back
+// to a deterministic short SHA-1 hex so distinct names get distinct keys
+// while the same-spelling repeat still resolves to the same key.
+export function normalizeForDomain(name: string): string {
+  const stripped = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+  if (stripped !== "") return stripped;
+  return shortHash(name);
+}
+
+function shortHash(input: string): string {
+  return createHash("sha1").update(input).digest("hex").slice(0, 12);
 }
 
 function safeFromCodePoint(code: number): string {
