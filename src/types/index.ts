@@ -121,6 +121,60 @@ export interface PurgeCounts {
 
 export type RiskLevel = "low" | "medium" | "high" | "blocked";
 
+// What the careers enricher needs to do its job. Kept here (next to
+// LeadRepository) so the public storage surface stays in one file.
+export interface UnknownJobCandidate {
+  jobId: number;
+  companyId: number;
+  normalizedTitle: string;
+  // Job URL is included so a future enricher can dedupe by URL even when
+  // the title is generic; v1 uses the title only.
+  jobUrl: string | null;
+}
+
+export interface CareersSourceWriteSuccess {
+  url: string;
+  fetchStatus: "success";
+  parseStatus: "matched" | "no_match";
+}
+
+export interface CareersSourceWriteFailure {
+  url: string;
+  fetchStatus: "failed";
+  errorCode: string;
+  errorMessage: string;
+}
+
+export type CareersSourceWrite =
+  | CareersSourceWriteSuccess
+  | CareersSourceWriteFailure;
+
+// Subset of ScoreCompanyInput the repo can rebuild from rows. The enricher
+// then layers the scorer-specific `now` and computes the rest. We import
+// from scoring here is intentional — re-scoring is the whole point of the
+// enrichment pipeline and the input shape is stable.
+//
+// The scoring types stay one-way independent (scoring never imports from
+// storage), so this file plays adapter.
+export interface CompanyScoreInputView {
+  companyId: number;
+  directionTags: readonly string[];
+  jobs: ReadonlyArray<{
+    title: string;
+    freshness: FreshnessStatus;
+    evidenceSourceId: number | null;
+  }>;
+  contacts: ReadonlyArray<{
+    contactType: string;
+    riskLevel: RiskLevel;
+    evidenceSourceId: number | null;
+  }>;
+  excludedByRule: boolean;
+  exclusionReason: string | null;
+  primarySourceId: number | null;
+  now: Date;
+}
+
 export interface LeadRepository {
   startRun(input: { source: string; limit: number }): RunRecord;
   finishRun(runId: string, status: RunStatus, errorSummary?: string): void;
@@ -151,4 +205,39 @@ export interface LeadRepository {
   purgeOlderThan(cutoff: string): PurgeCounts;
   purgeContactsByRisk(levels: ReadonlyArray<RiskLevel>): PurgeCounts;
   purgeCompany(domain: string): PurgeCounts;
+
+  // TB-9 careers enricher. These methods are additive: existing callers
+  // (collect, report, purge) don't touch them.
+  //
+  // listJobsWithFreshness returns every job currently sitting at `status`.
+  // The enricher iterates the `unknown` rows and tries to probe each
+  // company's careers page. Returning the company id alongside the job
+  // means the enricher can `getPrimaryHttpDomain(companyId)` without an
+  // extra round-trip per job.
+  listJobsWithFreshness(status: FreshnessStatus): UnknownJobCandidate[];
+
+  // Returns a non-hn: domain for the company, or null if every domain on
+  // file is a synthetic hn:<hash> key (issue #25). The enricher uses null
+  // as "skip this company silently — there's no real URL to probe."
+  getPrimaryHttpDomain(companyId: number): string | null;
+
+  // Persist a careers-page probe outcome (success-with-match,
+  // success-without-match, or fetch failure). Returns the new sources.id.
+  // The enricher passes that id to upgradeJobFreshness so the source row is
+  // the audit trail for the upgrade.
+  recordCareersSource(input: CareersSourceWrite): number;
+
+  // Move the job from `unknown` to `to` (typically `usable`). Returns true
+  // if a row changed, false if the job was already at >= `to` strength so
+  // the enricher can keep counters honest. Never demotes a stronger source:
+  // a job already `fresh` is skipped silently and the method returns false.
+  upgradeJobFreshness(
+    jobId: number,
+    to: FreshnessStatus,
+    sourceId: number,
+  ): boolean;
+
+  // Read back everything the scorer needs to re-score a company after an
+  // enrichment write. `now` is injected so tests stay deterministic.
+  getCompanyScoreInput(companyId: number, now: Date): CompanyScoreInputView;
 }

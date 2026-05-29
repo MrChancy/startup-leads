@@ -8,6 +8,11 @@ import { hnCollector, HN_SOURCE } from "../collectors/hn/index.ts";
 import { openLeadRepository } from "../storage/index.ts";
 import { formatRunReport } from "../reporting/minimal.ts";
 import { getDatabasePath } from "../config/index.ts";
+import { createHttpClient } from "../http/index.ts";
+import {
+  formatEnrichResult,
+  runEnrichCareers,
+} from "../enrichers/careers/index.ts";
 import type { Collector } from "../collectors/types.ts";
 
 const COLLECTORS: Record<string, Collector> = {
@@ -64,6 +69,20 @@ async function main() {
         confirm: parsed.confirm,
       });
       process.stdout.write(formatPurgeResult(result) + "\n");
+      return;
+    }
+
+    if (parsed.kind === "enrich") {
+      // Production wiring: real HttpClient (rate-limited by QPS env var) and
+      // wall-clock now. Tests drive runEnrichCareers directly with fakes.
+      const http = createHttpClient();
+      const result = await runEnrichCareers({
+        repo,
+        http,
+        confirm: parsed.confirm,
+        now: () => new Date(),
+      });
+      process.stdout.write(formatEnrichResult(result, parsed.confirm) + "\n");
       return;
     }
   } finally {
