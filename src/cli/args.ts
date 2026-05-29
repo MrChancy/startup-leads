@@ -33,22 +33,11 @@ Options:
   --yes                                   Required for purge / enrich to actually write (dry-run otherwise).
 `;
 
-function readFlag(args: string[], flag: string) {
-  const idx = args.indexOf(flag);
-  if (idx === -1) {
-    return undefined;
-  }
-  return args[idx + 1];
-}
-
-// Variant of readFlag with the two A-2/A-3 fixes from CLAUDE.local.md.
+// The single flag-reading primitive — A-1/A-2/A-3 compliant. Returns:
 //   - { present: false } if the flag isn't in argv.
 //   - { present: true, value: null } if the flag is there but the next token
-//     is another flag or missing entirely.
+//     is another flag or missing entirely. Callers MUST error on this case.
 //   - { present: true, value: "..." } when both flag and value are real.
-// Existing readFlag stays put so the older `collect` / `report` paths keep
-// their current (buggy) behaviour; follow-up #16 will migrate them. New
-// purge code uses this one exclusively.
 function readFlagSafe(
   args: string[],
   flag: string,
@@ -56,35 +45,56 @@ function readFlagSafe(
   const idx = args.indexOf(flag);
   if (idx === -1) return { present: false };
   const next = args[idx + 1];
-  if (next === undefined || next.startsWith("--")) {
+  if (next === undefined || next === "" || next.startsWith("--")) {
     return { present: true, value: null };
   }
   return { present: true, value: next };
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
-  if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
+  // Issue #16 (A-1): only treat --help / -h as a help request when it's
+  // the SUBCOMMAND (positional 0). Pre-fix `argv.includes("--help")`
+  // matched even when --help appeared as a flag value
+  // (`collect --source --help`), silently masking the real misuse.
+  if (argv.length === 0) return { kind: "help" };
+  const head = argv[0]!;
+  if (head === "--help" || head === "-h" || head === "help") {
     return { kind: "help" };
   }
 
   const [command, ...rest] = argv;
 
   if (command === "collect") {
-    const limitStr = readFlag(rest, "--limit");
-    const limit = limitStr ? Number.parseInt(limitStr, 10) : 50;
+    const limitFlag = readFlagSafe(rest, "--limit");
+    if (limitFlag.present && limitFlag.value === null) {
+      return {
+        kind: "error",
+        message: "collect: --limit requires a positive integer (e.g. --limit 50)",
+      };
+    }
+    const limit = limitFlag.present
+      ? Number.parseInt(limitFlag.value as string, 10)
+      : 50;
     if (Number.isNaN(limit) || limit <= 0) {
       return { kind: "error", message: "collect: --limit must be a positive integer" };
     }
-    const source = readFlag(rest, "--source") ?? "fake";
+    const sourceFlag = readFlagSafe(rest, "--source");
+    if (sourceFlag.present && sourceFlag.value === null) {
+      return {
+        kind: "error",
+        message: "collect: --source requires a value (e.g. --source fake)",
+      };
+    }
+    const source = sourceFlag.present ? (sourceFlag.value as string) : "fake";
     return { kind: "collect", limit, source };
   }
 
   if (command === "report") {
-    const runId = readFlag(rest, "--run");
-    if (!runId) {
+    const runFlag = readFlagSafe(rest, "--run");
+    if (!runFlag.present || runFlag.value === null) {
       return { kind: "error", message: "report: --run <id> is required" };
     }
-    return { kind: "report", runId };
+    return { kind: "report", runId: runFlag.value };
   }
 
   if (command === "purge") {
