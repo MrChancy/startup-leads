@@ -34,6 +34,27 @@ test("findMonthlyPost returns null when no monthly thread exists yet", async () 
   expect(post).toBeNull();
 });
 
+test("findMonthlyPost survives a hit with title=null (#23 M1 regression)", async () => {
+  // pr-review #23 M1: the Algolia HN index occasionally returns hits with
+  // title=null for certain story types. Calling .toLowerCase() on null
+  // would throw mid-loop. Now: such hits are skipped and the May 2026
+  // thread (which has a real title) still wins.
+  const fixture = loadFixture<{ hits: Array<{ title: string | null }> }>(
+    "algolia-search.json",
+  );
+  const withNull = {
+    hits: [
+      { objectID: "999", title: null, created_at_i: 0 },
+      ...fixture.hits,
+    ],
+  };
+  const { client } = makeFakeHttpClient({
+    [ALGOLIA_BASE]: JSON.stringify(withNull),
+  });
+  const post = await findMonthlyPost({ client, reference: MAY_2026 });
+  expect(post?.title).toContain("May 2026");
+});
+
 test("findMonthlyPost returns null when no hit matches the reference month", async () => {
   // Hits exist but they're all April/Who-wants-to-be-hired — none is the
   // May "Who is hiring?" thread. We refuse to silently grab last month.

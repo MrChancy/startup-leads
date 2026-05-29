@@ -365,6 +365,10 @@ function freshnessFor(timeSec: number | undefined, now: Date): FreshnessStatus {
   if (typeof timeSec !== "number" || !Number.isFinite(timeSec)) {
     return "unknown";
   }
+  // pr-review #23 M2: time=0 is the Unix epoch — clearly a bogus HN value
+  // (no real comment was posted in 1970). Without this guard the age would
+  // compute to ~56 years and the job would be silently labelled `stale`.
+  if (timeSec <= 0) return "unknown";
   const ageDays = (now.getTime() - timeSec * 1000) / (1000 * 60 * 60 * 24);
   if (ageDays < 0) return "fresh"; // future-dated posts shouldn't kill the run
   if (ageDays <= FRESH_DAYS) return "fresh";

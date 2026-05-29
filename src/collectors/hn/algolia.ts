@@ -19,7 +19,10 @@ export const ALGOLIA_BASE =
 
 export interface AlgoliaHit {
   objectID: string;
-  title: string;
+  // pr-review #23 M1: nullable to match what the live Algolia HN index
+  // actually returns. The `find` predicate below rejects non-string titles
+  // before any string method runs.
+  title: string | null;
   created_at_i: number;
 }
 
@@ -68,6 +71,7 @@ export async function findMonthlyPost(
   const needle = `${month} ${year}`.toLowerCase();
 
   const match = hits.find((hit) => {
+    if (typeof hit.title !== "string") return false;
     const title = hit.title.toLowerCase();
     return (
       title.includes("who is hiring") &&
@@ -76,6 +80,6 @@ export async function findMonthlyPost(
     );
   });
 
-  if (!match) return null;
+  if (!match || typeof match.title !== "string") return null;
   return { postId: match.objectID, title: match.title };
 }
