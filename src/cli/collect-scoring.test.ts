@@ -81,6 +81,40 @@ test("runCollect scores each stored lead and reports decision distribution", asy
   expect(result.decisions.localOnly).toBe(1);
 });
 
+test("runCollect rolls back the entire lead when writeLeadScore throws (H-2)", async () => {
+  // pr-review H-2: upsert + score must be co-transactional. A failing
+  // writeLeadScore would otherwise leave the company / domain / source
+  // committed and dedupe-skip on every subsequent run — permanent split-brain.
+  const { repo, db } = createInMemoryRepository();
+  const failingRepo = {
+    ...repo,
+    writeLeadScore: () => {
+      throw new Error("simulated score writer failure");
+    },
+  };
+
+  await expect(
+    runCollect({
+      repo: failingRepo,
+      collector: fixtureCollector,
+      limit: 50,
+    }),
+  ).rejects.toThrow(/simulated score writer failure/);
+
+  const companies = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM companies")
+    .get();
+  const jobs = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM jobs")
+    .get();
+  const scores = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM lead_scores")
+    .get();
+  expect(companies?.c).toBe(0);
+  expect(jobs?.c).toBe(0);
+  expect(scores?.c).toBe(0);
+});
+
 test("runCollect skips scoring deduped leads (no new score row)", async () => {
   const { repo, db } = createInMemoryRepository();
   await runCollect({ repo, collector: fixtureCollector, limit: 50 });

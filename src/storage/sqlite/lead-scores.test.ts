@@ -28,9 +28,13 @@ function sampleLead(): CollectedLead {
   };
 }
 
-function sampleScore(companyId: number): LeadScoreRecord {
+function sampleScore(
+  companyId: number,
+  runId = "test-run-id",
+): LeadScoreRecord {
   return {
     companyId,
+    runId,
     score: 82,
     jobMatchScore: 35,
     directionScore: 20,
@@ -61,7 +65,7 @@ test("writeLeadScore inserts a row with all sub-scores and decision", () => {
   const run = repo.startRun({ source: "fake", limit: 1 });
   const stored = repo.upsertCollectedLead(sampleLead(), run.id);
 
-  repo.writeLeadScore(sampleScore(stored.companyId));
+  repo.writeLeadScore(sampleScore(stored.companyId, run.id));
 
   const row = db
     .query<
@@ -113,13 +117,13 @@ test("writeLeadScore is append-only: two scores for the same company produce two
   const { repo, db } = createInMemoryRepository();
   const run1 = repo.startRun({ source: "fake", limit: 1 });
   const stored1 = repo.upsertCollectedLead(sampleLead(), run1.id);
-  repo.writeLeadScore(sampleScore(stored1.companyId));
+  repo.writeLeadScore(sampleScore(stored1.companyId, run1.id));
   repo.finishRun(run1.id, "completed");
 
   const run2 = repo.startRun({ source: "fake", limit: 1 });
   repo.upsertCollectedLead(sampleLead(), run2.id);
   repo.writeLeadScore({
-    ...sampleScore(stored1.companyId),
+    ...sampleScore(stored1.companyId, run2.id),
     score: 55,
     decision: "local_only",
   });
@@ -150,7 +154,7 @@ test("countDecisionsByRun groups by latest decision per company in the run", () 
     run.id,
   );
   repo.writeLeadScore({
-    ...sampleScore(a.companyId),
+    ...sampleScore(a.companyId, run.id),
     decision: "accepted_for_feishu",
   });
 
@@ -164,7 +168,7 @@ test("countDecisionsByRun groups by latest decision per company in the run", () 
     run.id,
   );
   repo.writeLeadScore({
-    ...sampleScore(b.companyId),
+    ...sampleScore(b.companyId, run.id),
     decision: "local_only",
   });
 
@@ -178,7 +182,7 @@ test("countDecisionsByRun groups by latest decision per company in the run", () 
     run.id,
   );
   repo.writeLeadScore({
-    ...sampleScore(c.companyId),
+    ...sampleScore(c.companyId, run.id),
     decision: "stale",
   });
 
@@ -201,17 +205,49 @@ test("countDecisionsByRun reads the latest score per company when re-scored in t
   const run = repo.startRun({ source: "fake", limit: 1 });
   const stored = repo.upsertCollectedLead(sampleLead(), run.id);
   repo.writeLeadScore({
-    ...sampleScore(stored.companyId),
+    ...sampleScore(stored.companyId, run.id),
     decision: "local_only",
   });
   repo.writeLeadScore({
-    ...sampleScore(stored.companyId),
+    ...sampleScore(stored.companyId, run.id),
     decision: "accepted_for_feishu",
   });
   repo.finishRun(run.id, "completed");
 
   expect(repo.countDecisionsByRun(run.id)).toEqual({
     acceptedForFeishu: 1,
+    localOnly: 0,
+    stale: 0,
+    blockedContact: 0,
+    needsReview: 0,
+    excludedByRule: 0,
+  });
+});
+
+test("countDecisionsByRun for a re-run that dedupes everything reports all zeros (H-1 regression)", () => {
+  // pr-review H-1: countDecisionsByRun must reflect "decisions PRODUCED in
+  // this run", not "current decisions of companies touched by this run".
+  // Otherwise re-running collect against the same fixture re-attributes
+  // old decisions to the new run id and the CLI silently lies.
+  const { repo } = createInMemoryRepository();
+
+  const run1 = repo.startRun({ source: "fake", limit: 1 });
+  const stored = repo.upsertCollectedLead(sampleLead(), run1.id);
+  repo.writeLeadScore({
+    ...sampleScore(stored.companyId),
+    runId: run1.id,
+    decision: "accepted_for_feishu",
+  });
+  repo.finishRun(run1.id, "completed");
+
+  // Second run: same lead → dedupe → no new score row.
+  const run2 = repo.startRun({ source: "fake", limit: 1 });
+  const reupsert = repo.upsertCollectedLead(sampleLead(), run2.id);
+  expect(reupsert.status).toBe("deduped");
+  repo.finishRun(run2.id, "completed");
+
+  expect(repo.countDecisionsByRun(run2.id)).toEqual({
+    acceptedForFeishu: 0,
     localOnly: 0,
     stale: 0,
     blockedContact: 0,

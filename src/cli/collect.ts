@@ -66,25 +66,32 @@ export async function runCollect(input: {
     const leads = await collector.collect({ limit });
     const now = new Date();
     for (const lead of leads) {
-      const stored = repo.upsertCollectedLead(lead, run.id);
-      // Skip scoring on dedupe: the existing company already has the
-      // freshest scoring snapshot from the previous run, and re-scoring it
-      // here would duplicate audit rows without new evidence. TB-11 will
-      // revisit this once HN evidence is re-ingestable per run.
-      if (stored.status === "deduped") continue;
-      const scoreInput = toScoreInput(lead, stored.companyId, now);
-      const result = scoreCompany(scoreInput);
-      repo.writeLeadScore({
-        companyId: result.companyId,
-        score: result.score,
-        jobMatchScore: result.jobMatchScore,
-        directionScore: result.directionScore,
-        freshnessScore: result.freshnessScore,
-        contactScore: result.contactScore,
-        actionabilityScore: result.actionabilityScore,
-        matchReason: result.matchReason,
-        decision: result.decision,
-        scorerVersion: result.scorerVersion,
+      // pr-review H-2: upsert + scoring are wrapped in one transaction so
+      // a failure in writeLeadScore (or scorer regression that throws on
+      // the input) rolls back the company / domain / source / events too —
+      // no permanent "stored without a score" orphans. Nested SAVEPOINTs
+      // mean the inner upsertCollectedLead tx still works.
+      repo.withTransaction(() => {
+        const stored = repo.upsertCollectedLead(lead, run.id);
+        // Skip scoring on dedupe: the existing company already has its
+        // most recent scoring snapshot from the previous run, and
+        // re-scoring would duplicate audit rows without new evidence.
+        if (stored.status === "deduped") return;
+        const scoreInput = toScoreInput(lead, stored.companyId, now);
+        const result = scoreCompany(scoreInput);
+        repo.writeLeadScore({
+          companyId: result.companyId,
+          runId: run.id,
+          score: result.score,
+          jobMatchScore: result.jobMatchScore,
+          directionScore: result.directionScore,
+          freshnessScore: result.freshnessScore,
+          contactScore: result.contactScore,
+          actionabilityScore: result.actionabilityScore,
+          matchReason: result.matchReason,
+          decision: result.decision,
+          scorerVersion: result.scorerVersion,
+        });
       });
     }
     repo.finishRun(run.id, "completed");

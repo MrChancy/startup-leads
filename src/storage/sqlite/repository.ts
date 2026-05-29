@@ -141,6 +141,7 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
     void,
     [
       number,
+      string,
       number,
       number,
       number,
@@ -154,33 +155,28 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
     ]
   >(
     `INSERT INTO lead_scores
-     (company_id, score, job_match_score, direction_score, freshness_score,
+     (company_id, run_id, score, job_match_score, direction_score, freshness_score,
       contact_score, actionability_score, match_reason, decision, scorer_version, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
-  // Decision per company is "latest lead_scores row in this run". To stay
-  // append-only, we resolve which companies belong to a run via
-  // run_lead_events (stored / deduped events), then pick MAX(id) per company
-  // in lead_scores. SQLite's correlated subquery is fine here — at TB-2
-  // scale runs hold <10 companies; TB-11 will replace this with a proper
-  // indexed materialised view if needed.
+  // Decisions PRODUCED in a given run. We filter lead_scores by run_id (set
+  // at writeLeadScore time) and pick the latest row per company so that
+  // multiple score writes inside one run still display the last decision —
+  // but old runs do NOT contribute. A re-run that fully dedupes correctly
+  // reports zeros (pr-review H-1 regression pinned by lead-scores.test.ts).
   const decisionsByRun = db.prepare<
     { decision: string; n: number },
     [string]
   >(
-    `WITH run_companies AS (
-       SELECT DISTINCT company_id
-       FROM run_lead_events
-       WHERE run_id = ? AND company_id IS NOT NULL
-     ),
-     latest AS (
-       SELECT rc.company_id, (
-         SELECT decision FROM lead_scores ls
-         WHERE ls.company_id = rc.company_id
-         ORDER BY ls.id DESC LIMIT 1
-       ) AS decision
-       FROM run_companies rc
+    `WITH latest AS (
+       SELECT company_id, decision
+       FROM lead_scores ls
+       WHERE ls.run_id = ?
+         AND ls.id = (
+           SELECT MAX(id) FROM lead_scores
+           WHERE company_id = ls.company_id AND run_id = ls.run_id
+         )
      )
      SELECT decision, COUNT(*) AS n
      FROM latest
@@ -189,6 +185,13 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
   );
 
   return {
+    withTransaction<T>(fn: () => T): T {
+      // bun:sqlite's db.transaction returns a wrapped fn; invoke immediately.
+      // Nested transactions use SAVEPOINTs, so wrapping a block that calls
+      // upsertCollectedLead (already a tx) is safe.
+      return db.transaction(fn)();
+    },
+
     startRun({ source, limit }) {
       const id = randomUUID();
       const startedAt = new Date().toISOString();
@@ -317,6 +320,7 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
       );
       insertScore.run(
         score.companyId,
+        score.runId,
         score.score,
         score.jobMatchScore,
         score.directionScore,
