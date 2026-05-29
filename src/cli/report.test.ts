@@ -9,9 +9,12 @@ test("runReport returns found=true and canonical line for an existing run", () =
 
   const result = runReport({ repo, runId: run.id });
   expect(result.found).toBe(true);
-  expect(result.line).toBe(
+  // TB-2 added a decisions line. Use toContain so future report extensions
+  // don't churn this assertion.
+  expect(result.line).toContain(
     `Run ${run.id} completed: 0 candidates, 0 stored, 0 dedupe, 0 fetch_failed, 0 parse_failed`,
   );
+  expect(result.line).toContain("Decisions:");
 });
 
 test("runReport returns found=false and a not-found line for an unknown run id", () => {

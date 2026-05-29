@@ -2,7 +2,9 @@ import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import type {
   CollectedLead,
+  DecisionCounts,
   LeadRepository,
+  LeadScoreRecord,
   RunCounts,
   RunRecord,
   RunStatus,
@@ -135,6 +137,57 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
     "SELECT event_type, COUNT(*) AS n FROM run_lead_events WHERE run_id = ? GROUP BY event_type",
   );
 
+  const insertScore = db.prepare<
+    void,
+    [
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      string,
+      string,
+      string,
+      string,
+    ]
+  >(
+    `INSERT INTO lead_scores
+     (company_id, score, job_match_score, direction_score, freshness_score,
+      contact_score, actionability_score, match_reason, decision, scorer_version, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  // Decision per company is "latest lead_scores row in this run". To stay
+  // append-only, we resolve which companies belong to a run via
+  // run_lead_events (stored / deduped events), then pick MAX(id) per company
+  // in lead_scores. SQLite's correlated subquery is fine here — at TB-2
+  // scale runs hold <10 companies; TB-11 will replace this with a proper
+  // indexed materialised view if needed.
+  const decisionsByRun = db.prepare<
+    { decision: string; n: number },
+    [string]
+  >(
+    `WITH run_companies AS (
+       SELECT DISTINCT company_id
+       FROM run_lead_events
+       WHERE run_id = ? AND company_id IS NOT NULL
+     ),
+     latest AS (
+       SELECT rc.company_id, (
+         SELECT decision FROM lead_scores ls
+         WHERE ls.company_id = rc.company_id
+         ORDER BY ls.id DESC LIMIT 1
+       ) AS decision
+       FROM run_companies rc
+     )
+     SELECT decision, COUNT(*) AS n
+     FROM latest
+     WHERE decision IS NOT NULL
+     GROUP BY decision`,
+  );
+
   return {
     startRun({ source, limit }) {
       const id = randomUUID();
@@ -247,6 +300,69 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
         return { companyId, status: "created" };
       },
     ),
+
+    writeLeadScore(score: LeadScoreRecord) {
+      // Single-INSERT — no transaction needed per S-2 ("multi-statement
+      // writes must be transactional"). bun:sqlite makes a single prepared
+      // statement atomic by itself.
+      // match_reason JSON keys match the spec's snake_case shape; the
+      // in-memory DTO uses camelCase per TS convention.
+      const reasonJson = JSON.stringify(
+        score.matchReason.map((entry) => ({
+          component: entry.component,
+          points: entry.points,
+          evidence_source_id: entry.evidenceSourceId,
+          note: entry.note,
+        })),
+      );
+      insertScore.run(
+        score.companyId,
+        score.score,
+        score.jobMatchScore,
+        score.directionScore,
+        score.freshnessScore,
+        score.contactScore,
+        score.actionabilityScore,
+        reasonJson,
+        score.decision,
+        score.scorerVersion,
+        new Date().toISOString(),
+      );
+    },
+
+    countDecisionsByRun(runId): DecisionCounts {
+      const counts: DecisionCounts = {
+        acceptedForFeishu: 0,
+        localOnly: 0,
+        stale: 0,
+        blockedContact: 0,
+        needsReview: 0,
+        excludedByRule: 0,
+      };
+      for (const row of decisionsByRun.all(runId)) {
+        switch (row.decision) {
+          case "accepted_for_feishu":
+            counts.acceptedForFeishu = row.n;
+            break;
+          case "local_only":
+            counts.localOnly = row.n;
+            break;
+          case "stale":
+            counts.stale = row.n;
+            break;
+          case "blocked_contact":
+            counts.blockedContact = row.n;
+            break;
+          case "needs_review":
+            counts.needsReview = row.n;
+            break;
+          case "excluded_by_rule":
+            counts.excludedByRule = row.n;
+            break;
+        }
+      }
+      return counts;
+    },
 
     countByRun(runId): RunCounts {
       const counts: RunCounts = {

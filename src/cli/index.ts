@@ -34,12 +34,12 @@ async function main() {
         process.stderr.write(`Unknown source: ${parsed.source}\n`);
         process.exit(1);
       }
-      const { runId, counts } = await runCollect({
+      const { runId, counts, decisions } = await runCollect({
         repo,
         collector,
         limit: parsed.limit,
       });
-      process.stdout.write(formatRunReport(runId, counts) + "\n");
+      process.stdout.write(formatRunReport(runId, counts, decisions) + "\n");
       return;
     }
 

@@ -15,5 +15,12 @@ export function runReport(input: {
   if (!run) {
     return { found: false, line: `Run ${runId} not found` };
   }
-  return { found: true, line: formatRunReport(runId, repo.countByRun(runId)) };
+  return {
+    found: true,
+    line: formatRunReport(
+      runId,
+      repo.countByRun(runId),
+      repo.countDecisionsByRun(runId),
+    ),
+  };
 }
