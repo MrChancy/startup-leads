@@ -11,6 +11,7 @@ export type ParsedArgs =
   | { kind: "collect"; limit: number; source: string }
   | { kind: "report"; runId: string }
   | { kind: "purge"; mode: PurgeMode; confirm: boolean }
+  | { kind: "enrich"; target: "careers"; confirm: boolean }
   | { kind: "error"; message: string };
 
 export const HELP_TEXT = `startup-leads — local-first job lead CLI
@@ -21,13 +22,15 @@ Usage:
 Commands:
   collect [--limit N] [--source <name>]   Run a collector and store its leads.
   report --run <id>                       Print the run summary for <id>.
+  enrich careers [--yes]                  Probe each company's careers page; upgrade
+                                          matching unknown jobs to usable (dry-run otherwise).
   purge --older-than <Nd> [--yes]         Delete rows older than the cutoff.
   purge --risk <list>     [--yes]         Delete contacts with the listed risk levels.
   purge --company <domain> [--yes]        Delete a single company and all its dependents.
 
 Options:
   -h, --help                              Show this help.
-  --yes                                   Required for purge to actually delete (dry-run otherwise).
+  --yes                                   Required for purge / enrich to actually write (dry-run otherwise).
 `;
 
 function readFlag(args: string[], flag: string) {
@@ -88,7 +91,29 @@ export function parseArgs(argv: string[]): ParsedArgs {
     return parsePurgeArgs(rest);
   }
 
+  if (command === "enrich") {
+    return parseEnrichArgs(rest);
+  }
+
   return { kind: "error", message: `Unknown command: ${command ?? ""}` };
+}
+
+function parseEnrichArgs(rest: string[]): ParsedArgs {
+  // v1 only ships one enricher (careers). We require the target as a
+  // positional arg rather than guessing because TB-10 will add `github` and
+  // shipping a default-target now would change behaviour silently then.
+  const [target, ...flags] = rest;
+  if (!target) {
+    return {
+      kind: "error",
+      message: "enrich: target is required (e.g. `enrich careers`)",
+    };
+  }
+  if (target !== "careers") {
+    return { kind: "error", message: `enrich: unknown target "${target}"` };
+  }
+  const confirm = flags.includes("--yes");
+  return { kind: "enrich", target: "careers", confirm };
 }
 
 function parsePurgeArgs(rest: string[]): ParsedArgs {

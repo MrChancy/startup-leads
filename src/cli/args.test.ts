@@ -109,3 +109,33 @@ test("parseArgs purge --company empty is an error", () => {
   const r = parseArgs(["purge", "--company", ""]);
   expect(r.kind).toBe("error");
 });
+
+// --- enrich ---------------------------------------------------------------
+
+test("parseArgs enrich careers defaults to confirm=false (dry-run)", () => {
+  expect(parseArgs(["enrich", "careers"])).toEqual({
+    kind: "enrich",
+    target: "careers",
+    confirm: false,
+  });
+});
+
+test("parseArgs enrich careers --yes flips confirm", () => {
+  expect(parseArgs(["enrich", "careers", "--yes"])).toEqual({
+    kind: "enrich",
+    target: "careers",
+    confirm: true,
+  });
+});
+
+test("parseArgs enrich with no target is an error", () => {
+  const r = parseArgs(["enrich"]);
+  expect(r.kind).toBe("error");
+  expect(r.kind === "error" && r.message).toMatch(/target is required/);
+});
+
+test("parseArgs enrich with unknown target is an error", () => {
+  const r = parseArgs(["enrich", "github"]);
+  expect(r.kind).toBe("error");
+  expect(r.kind === "error" && r.message).toMatch(/unknown target/);
+});

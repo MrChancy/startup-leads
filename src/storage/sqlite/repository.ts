@@ -3,8 +3,11 @@ import { randomUUID } from "node:crypto";
 import { normalizeCompanyName } from "../../normalizers/company-name.ts";
 import { isDirectionTag } from "../../types/direction-tags.ts";
 import type {
+  CareersSourceWrite,
   CollectedLead,
+  CompanyScoreInputView,
   DecisionCounts,
+  FreshnessStatus,
   LeadRepository,
   LeadScoreRecord,
   PurgeCounts,
@@ -13,6 +16,7 @@ import type {
   RunRecord,
   RunStatus,
   StoredLeadResult,
+  UnknownJobCandidate,
 } from "../../types/index.ts";
 import {
   previewPurgeCompany as previewPurgeCompanySql,
@@ -221,6 +225,99 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
      FROM latest
      WHERE decision IS NOT NULL
      GROUP BY decision`,
+  );
+
+  // ---- TB-9 careers enricher statements ------------------------------------
+
+  const listJobsByStatusStmt = db.prepare<
+    {
+      id: number;
+      company_id: number;
+      normalized_title: string | null;
+      job_url: string | null;
+    },
+    [string]
+  >(
+    `SELECT id, company_id, normalized_title, job_url
+     FROM jobs
+     WHERE freshness_status = ?
+     ORDER BY id`,
+  );
+
+  // Primary domain first, then the rest by id. The enricher filters out the
+  // `hn:` synthetic keys at the SQL level so the JS side never sees a
+  // non-probeable string. is_primary DESC ranks the primary first so the
+  // typical case is one row, not a sort-then-pick.
+  const httpDomainStmt = db.prepare<
+    { domain: string },
+    [number]
+  >(
+    `SELECT domain FROM company_domains
+     WHERE company_id = ?
+       AND domain NOT LIKE 'hn:%'
+     ORDER BY is_primary DESC, id ASC
+     LIMIT 1`,
+  );
+
+  const insertCareersSourceStmt = db.prepare<
+    { id: number },
+    [string, string, string, string | null, string | null, string | null]
+  >(
+    `INSERT INTO sources
+       (source_type, source_url, retrieved_at, fetch_status, parse_status, error_code, error_message)
+     VALUES ('careers_page', ?, ?, ?, ?, ?, ?)
+     RETURNING id`,
+  );
+
+  // Only upgrade when the existing freshness is `unknown` so this method
+  // can never demote a stronger source. The caller still gets `false` back
+  // (changes() === 0) and reports it accurately.
+  const upgradeJobStmt = db.prepare<
+    void,
+    [string, number, string, number]
+  >(
+    `UPDATE jobs
+     SET freshness_status = ?,
+         source_id = ?,
+         row_updated_at = ?
+     WHERE id = ?
+       AND freshness_status = 'unknown'`,
+  );
+
+  const selectCompanyForScoreStmt = db.prepare<
+    {
+      direction_tags: string | null;
+      excluded: number;
+      exclusion_reason: string | null;
+      primary_domain_id: number | null;
+    },
+    [number]
+  >(
+    `SELECT direction_tags, excluded, exclusion_reason, primary_domain_id
+     FROM companies WHERE id = ?`,
+  );
+
+  const selectJobsForScoreStmt = db.prepare<
+    { title: string | null; freshness_status: string | null; source_id: number | null },
+    [number]
+  >(
+    `SELECT title, freshness_status, source_id FROM jobs
+     WHERE company_id = ? ORDER BY id`,
+  );
+
+  const selectContactsForScoreStmt = db.prepare<
+    { contact_type: string | null; risk_level: string | null; source_id: number | null },
+    [number]
+  >(
+    `SELECT contact_type, risk_level, source_id FROM contacts
+     WHERE company_id = ? ORDER BY id`,
+  );
+
+  const selectPrimarySourceForScoreStmt = db.prepare<
+    { source_id: number | null },
+    [number]
+  >(
+    `SELECT source_id FROM company_domains WHERE id = ?`,
   );
 
   return {
@@ -528,6 +625,110 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
         }
       }
       return counts;
+    },
+
+    // ---- TB-9 careers enricher --------------------------------------------
+
+    listJobsWithFreshness(status: FreshnessStatus): UnknownJobCandidate[] {
+      const rows = listJobsByStatusStmt.all(status);
+      return rows
+        // A NULL / empty normalized_title couldn't match anything anyway and
+        // would let an empty string match every page (substring of ""). The
+        // matcher also guards against this, but skipping here saves a fetch.
+        .filter((row) => row.normalized_title && row.normalized_title.trim() !== "")
+        .map((row) => ({
+          jobId: row.id,
+          companyId: row.company_id,
+          normalizedTitle: row.normalized_title!,
+          jobUrl: row.job_url,
+        }));
+    },
+
+    getPrimaryHttpDomain(companyId: number): string | null {
+      const row = httpDomainStmt.get(companyId);
+      return row?.domain ?? null;
+    },
+
+    recordCareersSource(input: CareersSourceWrite): number {
+      const now = new Date().toISOString();
+      const row =
+        input.fetchStatus === "success"
+          ? insertCareersSourceStmt.get(
+              input.url,
+              now,
+              "success",
+              input.parseStatus,
+              null,
+              null,
+            )
+          : insertCareersSourceStmt.get(
+              input.url,
+              now,
+              "failed",
+              null,
+              input.errorCode,
+              input.errorMessage,
+            );
+      // SQLite RETURNING always yields a row when the INSERT succeeded; if it
+      // didn't we'd already have thrown. A null here would be a driver-level
+      // surprise so we surface it loudly rather than coerce.
+      if (!row) {
+        throw new Error("recordCareersSource: INSERT did not return an id");
+      }
+      return row.id;
+    },
+
+    upgradeJobFreshness(
+      jobId: number,
+      to: FreshnessStatus,
+      sourceId: number,
+    ): boolean {
+      const now = new Date().toISOString();
+      // The prepared UPDATE has `freshness_status = 'unknown'` in its WHERE,
+      // so we cannot demote a stronger source. bun:sqlite's Statement.run
+      // returns { changes, lastInsertRowid } — `changes` is 0 when the row
+      // was already past `unknown`, 1 when the upgrade landed.
+      const result = upgradeJobStmt.run(to, sourceId, now, jobId);
+      return result.changes > 0;
+    },
+
+    getCompanyScoreInput(companyId: number, now: Date): CompanyScoreInputView {
+      const company = selectCompanyForScoreStmt.get(companyId);
+      if (!company) {
+        throw new Error(
+          `getCompanyScoreInput: company ${companyId} not found`,
+        );
+      }
+      const jobs = selectJobsForScoreStmt.all(companyId).map((row) => ({
+        title: row.title ?? "",
+        // The DB column is unconstrained TEXT; we validated values at write
+        // time but still defend by mapping unknown text to "unknown" rather
+        // than letting a typo flow into the scorer.
+        freshness: (row.freshness_status as FreshnessStatus | null) ?? "unknown",
+        evidenceSourceId: row.source_id ?? null,
+      }));
+      const contacts = selectContactsForScoreStmt.all(companyId).map((row) => ({
+        contactType: row.contact_type ?? "",
+        riskLevel: (row.risk_level as RiskLevel | null) ?? "low",
+        evidenceSourceId: row.source_id ?? null,
+      }));
+      const directionTags = company.direction_tags
+        ? company.direction_tags.split(",").map((t) => t.trim()).filter(Boolean)
+        : [];
+      const primarySourceId =
+        company.primary_domain_id !== null
+          ? selectPrimarySourceForScoreStmt.get(company.primary_domain_id)?.source_id ?? null
+          : null;
+      return {
+        companyId,
+        directionTags,
+        jobs,
+        contacts,
+        excludedByRule: company.excluded === 1,
+        exclusionReason: company.exclusion_reason,
+        primarySourceId,
+        now,
+      };
     },
   };
 }

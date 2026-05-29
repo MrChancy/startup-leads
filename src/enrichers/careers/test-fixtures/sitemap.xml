@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://example.com/</loc></url>
+  <url><loc>https://example.com/about</loc></url>
+  <url><loc>https://example.com/careers</loc></url>
+  <url><loc>https://example.com/careers/backend-engineer</loc></url>
+  <url><loc>https://example.com/jobs/software-engineer</loc></url>
+  <url><loc>https://example.com/work-with-us/designer</loc></url>
+  <url><loc>https://example.com/blog/2024-recap</loc></url>
+</urlset>
