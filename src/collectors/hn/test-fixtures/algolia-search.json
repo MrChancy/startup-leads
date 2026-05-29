@@ -1,0 +1,23 @@
+{
+  "hits": [
+    {
+      "objectID": "42000001",
+      "title": "Ask HN: Who is hiring? (May 2026)",
+      "created_at_i": 1780099200,
+      "author": "whoishiring"
+    },
+    {
+      "objectID": "41999000",
+      "title": "Ask HN: Who wants to be hired? (May 2026)",
+      "created_at_i": 1780099200,
+      "author": "whoishiring"
+    },
+    {
+      "objectID": "41950000",
+      "title": "Ask HN: Who is hiring? (April 2026)",
+      "created_at_i": 1777420800,
+      "author": "whoishiring"
+    }
+  ],
+  "nbHits": 3
+}

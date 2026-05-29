@@ -8,8 +8,14 @@ test("fakeCollector advertises source = 'fake'", () => {
 test("fakeCollector returns three leads spanning the decision space", async () => {
   // Three leads so TB-2's decision-distribution report has something
   // visible to print without needing a real collector.
-  const leads = await fakeCollector.collect({ limit: 50 });
+  const { leads, parseFailed, fetchFailed } = await fakeCollector.collect({
+    limit: 50,
+  });
   expect(leads).toHaveLength(3);
+  // Fake never goes over the network, so both counters must be exactly 0
+  // (not undefined / not a placeholder). See CLAUDE.local.md I-1.
+  expect(parseFailed).toBe(0);
+  expect(fetchFailed).toBe(0);
 
   const names = leads.map((l) => l.companyName);
   expect(names).toEqual(["Acme AI", "Beta Cloud", "Gamma Labs"]);

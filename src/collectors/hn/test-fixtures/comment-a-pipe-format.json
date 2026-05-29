@@ -1,0 +1,8 @@
+{
+  "id": 42000010,
+  "type": "comment",
+  "by": "acme_hiring",
+  "time": 1780099200,
+  "parent": 42000001,
+  "text": "Acme AI (San Francisco, CA | REMOTE OK) | Backend Engineer | Full-time<p>We&#x27;re hiring backend engineers to scale our distributed inference platform. Stack: Go, Postgres, k8s.<p>Email: jobs@acme.ai<p>Apply: https:&#x2F;&#x2F;acme.ai&#x2F;careers"
+}
