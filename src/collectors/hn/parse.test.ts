@@ -116,6 +116,19 @@ test("parseComment D: comment without time gets freshness=unknown", () => {
   expect(result.lead.jobs[0]!.freshness).toBe("unknown");
 });
 
+test("parseComment with time=0 epoch is unknown, not stale (#23 M2 regression)", () => {
+  // pr-review #23 M2: Number.isFinite(0) === true, so the previous code
+  // computed age = ~56 years and labelled the job stale. time=0 is a
+  // clearly bogus value (HN epoch), not just an old one — return unknown.
+  const raw = loadFixture<FirebaseCommentItem>("comment-d-no-time.json");
+  const withZero = { ...raw, time: 0 };
+  const result = parseComment(withZero, { postTitle: POST_TITLE, now: NOW });
+  if (result.kind !== "ok") {
+    throw new Error(`expected ok, got ${result.kind}`);
+  }
+  expect(result.lead.jobs[0]!.freshness).toBe("unknown");
+});
+
 test("parseComment E: multi-role posting picks the first title (v1 simplification)", () => {
   const raw = loadFixture<FirebaseCommentItem>("comment-e-multi-role.json");
   const result = parseComment(raw, { postTitle: POST_TITLE, now: NOW });

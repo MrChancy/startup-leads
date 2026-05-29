@@ -6,7 +6,10 @@ const sampleLead = (): CollectedLead => ({
   companyName: "Acme AI",
   domain: "acme.ai",
   description: "An AI company",
-  directionTags: ["ai-application"],
+  // pr-review #21 M-3: was "ai-application" (legacy / not in spec enum).
+  // TB-4 added direction-tag rejection at upsert time so silent drop would
+  // become a hard error if the enum tightens further.
+  directionTags: ["ai-app"],
   jobs: [
     {
       title: "Backend Engineer",
