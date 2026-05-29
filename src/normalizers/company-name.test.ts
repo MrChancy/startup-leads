@@ -1,5 +1,36 @@
 import { test, expect } from "bun:test";
-import { normalizeCompanyName } from "./company-name.ts";
+import { normalizeCompanyName, validateAliases } from "./company-name.ts";
+
+// --- validateAliases: catches typos in the hand-curated alias file -------
+
+test("validateAliases rejects non-object input", () => {
+  expect(() => validateAliases(null)).toThrow(/JSON object/);
+  expect(() => validateAliases("string")).toThrow(/JSON object/);
+  expect(() => validateAliases([])).toThrow(/JSON object/);
+});
+
+test("validateAliases rejects an empty key", () => {
+  expect(() => validateAliases({ "": "foo" })).toThrow(/empty key/);
+});
+
+test("validateAliases rejects a non-string value", () => {
+  expect(() => validateAliases({ Foo: 42 })).toThrow(/must be a string/);
+  expect(() => validateAliases({ Foo: null })).toThrow(/must be a string/);
+});
+
+test("validateAliases rejects an empty-string value (typo guard)", () => {
+  expect(() => validateAliases({ "字节跳动": "" })).toThrow(/empty string/);
+});
+
+test("validateAliases accepts the shipped brand-aliases.json shape", () => {
+  expect(() =>
+    validateAliases({
+      "字节跳动": "bytedance",
+      DeepSeek: "deepseek",
+    }),
+  ).not.toThrow();
+});
+
 
 // Mechanics: trim → NFKC → alias lookup → lowercase → punctuation strip →
 // whitespace fold. Tests are arranged top-down in that order.

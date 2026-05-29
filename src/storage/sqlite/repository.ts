@@ -264,12 +264,16 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
 
         // Direction tags are validated up front so the warning, if any,
         // travels with the source row created below.
+        // Warnings use a "warn:" prefix so future enrichers (TB-9/10) that
+        // want to record actual evidence text into the same column can grep
+        // and strip these without conflict. Multiple `warn:` lines may be
+        // appended in the future; for now there is exactly one channel.
         const { accepted: acceptedTags, rejected: rejectedTags } =
           partitionDirectionTags(lead.directionTags);
         const evidenceSnippet =
           rejectedTags.length === 0
             ? null
-            : `direction_tag rejected: ${rejectedTags.join(", ")}`;
+            : `warn:direction_tag_rejected: ${rejectedTags.join(", ")}`;
 
         const sourceRow = insertSource.get(
           lead.source.sourceType,

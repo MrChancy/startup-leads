@@ -120,9 +120,19 @@ test(
   "step 2 bridges TB-3b's synthetic hn:<name> dedup key across language " +
     "variants of the same company",
   () => {
-    // HN parser builds `hn:bytedance` from "ByteDance" and `hn:` from
-    // "字节跳动" (CJK gets stripped to empty by normalizeForDomain). The two
-    // hn: keys therefore differ — step 1 cannot reconcile them. Step 2 must.
+    // What TB-3b's parser actually produces:
+    //   "ByteDance" → normalizeForDomain → "bytedance" → domain="hn:bytedance"
+    //   "字节跳动"   → normalizeForDomain strips all non-[a-z0-9] → ""
+    //                                                → domain="hn:"
+    // The two domains DIFFER so step 1 cannot reconcile them. Step 2 must,
+    // and it does — brand-aliases maps both to normalized_name="bytedance".
+    //
+    // CAVEAT (filed as follow-up against TB-3b): two unrelated all-CJK HN
+    // companies both produce domain="hn:" → step 1 then incorrectly merges
+    // them. TB-4 cannot fix that here; the fix belongs in TB-3b's
+    // normalizeForDomain (use a CJK transliteration or fall back to "hn:" +
+    // hash). This test pins the cross-language merge path, NOT the CJK
+    // collision path.
     const { repo, db } = createInMemoryRepository();
 
     const run = repo.startRun({ source: "hn_who_is_hiring", limit: 2 });
@@ -131,7 +141,7 @@ test(
       run.id,
     );
     const b = repo.upsertCollectedLead(
-      leadOf({ companyName: "字节跳动", domain: "hn:zijietiaodong" }),
+      leadOf({ companyName: "字节跳动", domain: "hn:" }),
       run.id,
     );
 
@@ -297,6 +307,9 @@ test(
       .get();
     expect(source?.evidence_snippet).toContain("ai-application");
     expect(source?.evidence_snippet).toContain("made-up");
+    // The warn: prefix namespaces this field so future enrichers can write
+    // real evidence text alongside the warning without colliding.
+    expect(source?.evidence_snippet).toMatch(/^warn:/);
   },
 );
 

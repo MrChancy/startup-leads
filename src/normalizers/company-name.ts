@@ -17,7 +17,35 @@
 
 import aliases from "./brand-aliases.json" with { type: "json" };
 
-const ALIASES = aliases as Record<string, string>;
+// Validate the hand-curated alias file at module load. A typo or stray
+// non-string value ships forever undetected otherwise (CLAUDE.local.md M-3 +
+// M-4 from PR for TB-4). Each entry must be { string → non-empty string }.
+export function validateAliases(raw: unknown): Record<string, string> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("brand-aliases.json must be a JSON object");
+  }
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key === "") {
+      throw new Error("brand-aliases.json contains an empty key");
+    }
+    if (typeof value !== "string") {
+      throw new Error(
+        `brand-aliases.json: value for "${key}" must be a string, got ${typeof value}`,
+      );
+    }
+    if (value === "") {
+      throw new Error(
+        `brand-aliases.json: value for "${key}" is an empty string; ` +
+          `omit the entry instead of mapping to ""`,
+      );
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+const ALIASES = validateAliases(aliases);
 
 export function normalizeCompanyName(raw: string): string {
   const trimmed = raw.trim();
