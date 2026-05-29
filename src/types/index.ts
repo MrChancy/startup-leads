@@ -59,10 +59,63 @@ export interface RunCounts {
 
 export type RunStatus = "completed" | "partial" | "failed";
 
+// Decision enum is duplicated by name (not by import) here to avoid making
+// the public storage surface depend on src/scoring/. The scorer is the
+// source of truth; this type only constrains what the repo can persist.
+// TB-4 will add 'duplicate' once the full 4-step dedupe rule lands. When
+// it does, DecisionCounts (below), the switch in countDecisionsByRun
+// (repository.ts), and the report line in src/reporting/minimal.ts all need
+// updating together.
+export type LeadScoreDecision =
+  | "accepted_for_feishu"
+  | "local_only"
+  | "stale"
+  | "blocked_contact"
+  | "needs_review"
+  | "excluded_by_rule";
+
+export interface LeadScoreRecord {
+  companyId: number;
+  runId: string;
+  score: number;
+  jobMatchScore: number;
+  directionScore: number;
+  freshnessScore: number;
+  contactScore: number;
+  actionabilityScore: number;
+  matchReason: LeadScoreMatchReasonEntry[];
+  decision: LeadScoreDecision;
+  scorerVersion: string;
+}
+
+export interface LeadScoreMatchReasonEntry {
+  component: string;
+  points: number;
+  evidenceSourceId: number | null;
+  note: string;
+}
+
+export interface DecisionCounts {
+  acceptedForFeishu: number;
+  localOnly: number;
+  stale: number;
+  blockedContact: number;
+  needsReview: number;
+  excludedByRule: number;
+}
+
 export interface LeadRepository {
   startRun(input: { source: string; limit: number }): RunRecord;
   finishRun(runId: string, status: RunStatus, errorSummary?: string): void;
   getRun(runId: string): RunRecord | null;
   upsertCollectedLead(lead: CollectedLead, runId: string): StoredLeadResult;
   countByRun(runId: string): RunCounts;
+  writeLeadScore(score: LeadScoreRecord): void;
+  // Wrap a block in a single SQLite transaction. Nested `db.transaction`
+  // calls become SAVEPOINTs, so it composes cleanly with the per-method
+  // transactions inside the repo (e.g. upsertCollectedLead). Used by
+  // runCollect so a partial scoring failure rolls back the whole lead.
+  withTransaction<T>(fn: () => T): T;
+  // Reads back the most recent score row per company seen in the run.
+  countDecisionsByRun(runId: string): DecisionCounts;
 }

@@ -2,7 +2,9 @@ import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import type {
   CollectedLead,
+  DecisionCounts,
   LeadRepository,
+  LeadScoreRecord,
   RunCounts,
   RunRecord,
   RunStatus,
@@ -135,7 +137,61 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
     "SELECT event_type, COUNT(*) AS n FROM run_lead_events WHERE run_id = ? GROUP BY event_type",
   );
 
+  const insertScore = db.prepare<
+    void,
+    [
+      number,
+      string,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      string,
+      string,
+      string,
+      string,
+    ]
+  >(
+    `INSERT INTO lead_scores
+     (company_id, run_id, score, job_match_score, direction_score, freshness_score,
+      contact_score, actionability_score, match_reason, decision, scorer_version, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  // Decisions PRODUCED in a given run. We filter lead_scores by run_id (set
+  // at writeLeadScore time) and pick the latest row per company so that
+  // multiple score writes inside one run still display the last decision —
+  // but old runs do NOT contribute. A re-run that fully dedupes correctly
+  // reports zeros (pr-review H-1 regression pinned by lead-scores.test.ts).
+  const decisionsByRun = db.prepare<
+    { decision: string; n: number },
+    [string]
+  >(
+    `WITH latest AS (
+       SELECT company_id, decision
+       FROM lead_scores ls
+       WHERE ls.run_id = ?
+         AND ls.id = (
+           SELECT MAX(id) FROM lead_scores
+           WHERE company_id = ls.company_id AND run_id = ls.run_id
+         )
+     )
+     SELECT decision, COUNT(*) AS n
+     FROM latest
+     WHERE decision IS NOT NULL
+     GROUP BY decision`,
+  );
+
   return {
+    withTransaction<T>(fn: () => T): T {
+      // bun:sqlite's db.transaction returns a wrapped fn; invoke immediately.
+      // Nested transactions use SAVEPOINTs, so wrapping a block that calls
+      // upsertCollectedLead (already a tx) is safe.
+      return db.transaction(fn)();
+    },
+
     startRun({ source, limit }) {
       const id = randomUUID();
       const startedAt = new Date().toISOString();
@@ -247,6 +303,70 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
         return { companyId, status: "created" };
       },
     ),
+
+    writeLeadScore(score: LeadScoreRecord) {
+      // Single-INSERT — no transaction needed per S-2 ("multi-statement
+      // writes must be transactional"). bun:sqlite makes a single prepared
+      // statement atomic by itself.
+      // match_reason JSON keys match the spec's snake_case shape; the
+      // in-memory DTO uses camelCase per TS convention.
+      const reasonJson = JSON.stringify(
+        score.matchReason.map((entry) => ({
+          component: entry.component,
+          points: entry.points,
+          evidence_source_id: entry.evidenceSourceId,
+          note: entry.note,
+        })),
+      );
+      insertScore.run(
+        score.companyId,
+        score.runId,
+        score.score,
+        score.jobMatchScore,
+        score.directionScore,
+        score.freshnessScore,
+        score.contactScore,
+        score.actionabilityScore,
+        reasonJson,
+        score.decision,
+        score.scorerVersion,
+        new Date().toISOString(),
+      );
+    },
+
+    countDecisionsByRun(runId): DecisionCounts {
+      const counts: DecisionCounts = {
+        acceptedForFeishu: 0,
+        localOnly: 0,
+        stale: 0,
+        blockedContact: 0,
+        needsReview: 0,
+        excludedByRule: 0,
+      };
+      for (const row of decisionsByRun.all(runId)) {
+        switch (row.decision) {
+          case "accepted_for_feishu":
+            counts.acceptedForFeishu = row.n;
+            break;
+          case "local_only":
+            counts.localOnly = row.n;
+            break;
+          case "stale":
+            counts.stale = row.n;
+            break;
+          case "blocked_contact":
+            counts.blockedContact = row.n;
+            break;
+          case "needs_review":
+            counts.needsReview = row.n;
+            break;
+          case "excluded_by_rule":
+            counts.excludedByRule = row.n;
+            break;
+        }
+      }
+      return counts;
+    },
 
     countByRun(runId): RunCounts {
       const counts: RunCounts = {

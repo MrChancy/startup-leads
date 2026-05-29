@@ -88,6 +88,11 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS lead_scores (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  -- run_id stamps which collect run produced this score. countDecisionsByRun
+  -- filters on it so a re-run that only dedupes does not silently re-attribute
+  -- old decisions to the new run id. SET NULL on run delete so score history
+  -- survives a runs cleanup (TB-12 purge territory).
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   score REAL,
   job_match_score REAL,
   direction_score REAL,
@@ -99,6 +104,8 @@ CREATE TABLE IF NOT EXISTS lead_scores (
   scorer_version TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS lead_scores_run_idx ON lead_scores(run_id);
 
 CREATE TABLE IF NOT EXISTS push_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
