@@ -60,6 +60,31 @@ test("getPrimaryHttpDomain returns a real domain and skips hn: prefixes", () => 
   expect(repo.getPrimaryHttpDomain(b.companyId)).toBeNull();
 });
 
+test("getPrimaryHttpDomain skips every synthetic-prefix domain shape (H2 regression)", () => {
+  // pr-review H2: the SQL guard was `NOT LIKE 'hn:%'` which would silently
+  // pass `github:vercel` / `yc:airbnb` from future collectors. Now it filters
+  // any domain containing a colon — real hostnames never do.
+  const { repo, db } = createInMemoryRepository();
+  const run = repo.startRun({ source: "fake", limit: 1 });
+  const lead1 = repo.upsertCollectedLead(
+    lead({ companyName: "GitHub Co", domain: "github:gh-co" }),
+    run.id,
+  );
+  const lead2 = repo.upsertCollectedLead(
+    lead({ companyName: "YC Co", domain: "yc:yc-co" }),
+    run.id,
+  );
+  expect(repo.getPrimaryHttpDomain(lead1.companyId)).toBeNull();
+  expect(repo.getPrimaryHttpDomain(lead2.companyId)).toBeNull();
+
+  // And still picks real ones when present.
+  db.exec(
+    `INSERT INTO company_domains (company_id, domain, is_primary, source_id, row_created_at)
+     VALUES (${lead1.companyId}, 'gh-co.com', 0, NULL, datetime('now'))`,
+  );
+  expect(repo.getPrimaryHttpDomain(lead1.companyId)).toBe("gh-co.com");
+});
+
 test("upgradeJobFreshness only upgrades unknown jobs and never demotes a stronger status", () => {
   const { repo, db } = createInMemoryRepository();
   const run = repo.startRun({ source: "fake", limit: 1 });

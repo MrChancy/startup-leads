@@ -254,7 +254,11 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
   >(
     `SELECT domain FROM company_domains
      WHERE company_id = ?
-       AND domain NOT LIKE 'hn:%'
+       -- pr-review H2: filter every synthetic-prefix domain, not just hn:.
+       -- A real hostname never contains a colon (bytedance.com OK,
+       -- hn:bytedance / github:vercel / yc:airbnb not), so one pattern
+       -- handles TB-3b plus future collectors without a schema change.
+       AND domain NOT LIKE '%:%'
      ORDER BY is_primary DESC, id ASC
      LIMIT 1`,
   );

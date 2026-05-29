@@ -55,6 +55,10 @@ export interface EnrichCareersResult {
   // page count when one page matches multiple normalized titles on the same
   // company.
   upgraded: number;
+  // Companies where processCompany threw an unexpected error after passing
+  // the domain-skip gate. Each one becomes a stderr line; the runs row's
+  // final status is 'partial' when this is > 0. pr-review C2/H4.
+  companyErrors: number;
   // Per-company outcomes for CLI listing (dry-run prints these so the user
   // sees exactly which domains will be probed before --yes).
   plan: Array<{ companyId: number; domain: string }>;
@@ -93,6 +97,7 @@ export async function runEnrichCareers(
     pagesNoMatch: 0,
     fetchFailed: 0,
     upgraded: 0,
+    companyErrors: 0,
     plan: [],
   };
 
@@ -121,20 +126,34 @@ export async function runEnrichCareers(
       continue;
     }
 
-    await processCompany({
-      repo,
-      http,
-      now,
-      companyId,
-      domain,
-      jobs,
-      result,
-      runId: enrichRun!.id,
-    });
+    // pr-review C2/H4: per-company try/catch so one company's unexpected
+    // throw (matchTitlesInPage on huge body, repo edge case, etc.) doesn't
+    // abort the run or leave the runs row dangling at status='partial'.
+    try {
+      await processCompany({
+        repo,
+        http,
+        now,
+        companyId,
+        domain,
+        jobs,
+        result,
+        runId: enrichRun!.id,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        `enrich: company #${companyId} failed — ${msg}\n`,
+      );
+      result.companyErrors++;
+    }
   }
 
   if (enrichRun) {
-    repo.finishRun(enrichRun.id, "completed");
+    repo.finishRun(
+      enrichRun.id,
+      result.companyErrors > 0 ? "partial" : "completed",
+    );
   }
   return { ...result, runId: enrichRun?.id ?? null };
 }
@@ -188,6 +207,12 @@ async function processCompany(args: ProcessCompanyArgs): Promise<void> {
   repo.withTransaction(() => {
     if (matches.length === 0) {
       result.pagesNoMatch++;
+      // pr-review H3: every `enrich careers --yes` against the same
+      // no_match company appends another sources row. That's intentional
+      // — it lets `report` track "we tried again and still saw nothing
+      // new" — and bloat is bounded by TB-12 `purge --older-than`. If
+      // unbounded growth ever becomes a real problem, add a content_hash
+      // dedup on the careers HTML before insert.
       repo.recordCareersSource({
         url: probe.url,
         fetchStatus: "success",
@@ -204,16 +229,32 @@ async function processCompany(args: ProcessCompanyArgs): Promise<void> {
     });
 
     const matchedTitles = new Set(matches.map((m) => m.normalizedTitle));
+    let upgradedThisCompany = 0;
     for (const job of jobs) {
       if (!matchedTitles.has(job.normalizedTitle)) continue;
       const changed = repo.upgradeJobFreshness(job.jobId, "usable", sourceId);
-      if (changed) result.upgraded++;
+      if (changed) {
+        result.upgraded++;
+        upgradedThisCompany++;
+      }
     }
+
+    // pr-review C3: skip the re-score row if a concurrent run / earlier
+    // enrich pass already advanced every matched job past `unknown`. The
+    // source row above still records that we successfully matched; only
+    // the lead_scores audit row is gated, because writing it with no
+    // actual change would attribute a stale decision to the enrich run.
+    if (upgradedThisCompany === 0) return;
 
     // Re-score uses the same scoreCompany pure function the collect path
     // uses, so any future scorer change is reflected here without a second
     // implementation drifting. The new row is appended (we never UPDATE
     // existing lead_scores); audit history survives.
+    //
+    // pr-review C1: scoreInput.excludedByRule is read live from the DB
+    // companies row, intentionally divergent from collect.ts which still
+    // hardcodes false until TB-4's exclusion-rule write path lands.
+    // Enrich is the first re-score path so it gets the live value first.
     const scoreInput = repo.getCompanyScoreInput(companyId, now());
     const newScore = scoreCompany({
       companyId: scoreInput.companyId,
@@ -260,7 +301,10 @@ function errorCodeOf(err: Error): string {
 // One-line plan formatter for the CLI. Kept here so any extension to the
 // EnrichCareersResult shape can update both producers and consumer in one
 // edit.
-export function formatEnrichResult(result: EnrichCareersResult, confirmed: boolean): string {
+export function formatEnrichResult(
+  result: EnrichCareersResult & { runId?: string | null },
+  confirmed: boolean,
+): string {
   const header = confirmed
     ? "Careers enrichment:"
     : "Careers enrichment plan (dry-run; pass --yes to probe):";
@@ -276,7 +320,13 @@ export function formatEnrichResult(result: EnrichCareersResult, confirmed: boole
       `  pages no_match            : ${result.pagesNoMatch}`,
       `  fetch_failed              : ${result.fetchFailed}`,
       `  jobs upgraded to usable   : ${result.upgraded}`,
+      `  company errors            : ${result.companyErrors}`,
     );
+    if (result.runId) {
+      // pr-review H1: print the enrich run id so the operator can call
+      // `report --run <id>` and see the new decisions attributed to it.
+      lines.push(`  run id                    : ${result.runId}`);
+    }
   }
   if (result.plan.length > 0) {
     lines.push("", confirmed ? "Probed:" : "Would probe:");

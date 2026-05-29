@@ -269,6 +269,59 @@ test("re-score writes a NEW lead_scores row rather than overwriting (audit histo
   expect(rows[1]!.freshness_score).toBeGreaterThan(rows[0]!.freshness_score);
 });
 
+test("matched page where every upgrade was a no-op does NOT append a lead_scores row (C3 regression)", async () => {
+  // pr-review C3: simulate a race — listJobsWithFreshness('unknown') saw
+  // the job, but by the time processCompany ran, an earlier enrich
+  // already promoted it (so upgradeJobFreshness's SQL guard returns
+  // false). matched=true, upgraded=0 → no NEW lead_scores row should
+  // append (it would attribute a stale decision to the enrich run).
+  // The source row still writes (we did successfully match the page).
+  const { repo, db } = createInMemoryRepository();
+  const runId = repo.startRun({ source: "test", limit: 1 }).id;
+  const stored = repo.upsertCollectedLead(lead(), runId);
+  // Force the seed job to 'unknown' so listJobsWithFreshness returns it.
+  db.exec(
+    `UPDATE jobs SET freshness_status = 'unknown' WHERE company_id = ${stored.companyId}`,
+  );
+
+  const scoresBefore = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM lead_scores")
+    .get();
+  const sourcesBefore = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM sources")
+    .get();
+
+  // Stub upgradeJobFreshness to always claim "no change", as if a
+  // concurrent writer beat us to it.
+  const stubbedRepo = { ...repo, upgradeJobFreshness: () => false };
+
+  const { client } = makeFakeHttpClient({
+    "https://acme.ai/careers": "<h1>Hiring Backend Engineer</h1>",
+  });
+  const result = await runEnrichCareers({
+    repo: stubbedRepo,
+    http: client,
+    confirm: true,
+    now: () => new Date(),
+  });
+
+  // pagesMatched should still increment (the page DID match).
+  expect(result.pagesMatched).toBe(1);
+  expect(result.upgraded).toBe(0);
+
+  // Source row written (matched proof).
+  const sourcesAfter = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM sources")
+    .get();
+  expect(sourcesAfter?.c).toBe((sourcesBefore?.c ?? 0) + 1);
+
+  // No new lead_scores row.
+  const scoresAfter = db
+    .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM lead_scores")
+    .get();
+  expect(scoresAfter?.c).toBe(scoresBefore?.c);
+});
+
 // ---- guard: no contact creation -------------------------------------------
 
 test("enricher never inserts a contact, even if the page contains an email", async () => {
