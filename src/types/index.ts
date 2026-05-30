@@ -326,10 +326,61 @@ export interface LeadRepository {
   // dozens, not thousands) so a JOIN-heavy single query would trade
   // clarity for no measurable win.
   listPushCandidates(query: PushCandidateQuery): PushCandidate[];
+
+  // TB-5 CSV export. Read-only — no transaction needed. Returns ONE row per
+  // company whose LATEST lead_scores row exists (any decision, any score).
+  // "Latest" means MAX(lead_scores.id) per company; same S-4 latest-row
+  // pattern as listPushCandidates, but without the decision / score gates
+  // and without the jobs freshness gate (CSV is the full audit dump).
+  //
+  // Ordering is `score DESC, company_id ASC` so the output is byte-stable
+  // across runs (S-3) and the AC's "ordered by score desc" holds.
+  //
+  // Companies with no lead_scores row at all are excluded — they were never
+  // scored, so there's no row of data to put in the CSV.
+  listAllForExport(): CsvExportRow[];
 }
 
 export interface PushCandidateQuery {
   minScore: number;
+}
+
+// TB-5 CSV export. Distinct from PushCandidate (which is post-filter):
+//   - includes companies of EVERY LeadScoreDecision value (accepted/local_only/
+//     stale/blocked_contact/excluded_by_rule/needs_review — plus 'duplicate'
+//     once TB-4 adds it), so CSV is the full audit dump rather than the
+//     push-eligible slice;
+//   - keeps `decision` so callers can render or filter by it;
+//   - includes jobs of EVERY freshness (fresh/usable/unknown/stale) — the
+//     CSV exporter rolls them up itself;
+//   - drops `sources` because the CSV columns don't surface URLs.
+// Companies with zero score rows are excluded (never scored → nothing to
+// say about them).
+export interface CsvExportRow {
+  companyId: number;
+  name: string;
+  domain: string | null;
+  description: string | null;
+  directionTags: readonly string[];
+  jobs: ReadonlyArray<{
+    title: string;
+    location: string | null;
+    freshness: FreshnessStatus;
+    sourcePostedAt: string | null;
+  }>;
+  contacts: ReadonlyArray<{
+    name: string | null;
+    contactType: string;
+    value: string;
+    riskLevel: RiskLevel;
+    priorityRank: number | null;
+  }>;
+  score: number;
+  scorerVersion: string;
+  decision: LeadScoreDecision;
+  matchReason: readonly LeadScoreMatchReasonEntry[];
+  // ISO timestamp of the latest lead_scores row's created_at.
+  lastCheckedAt: string;
 }
 
 export interface PushCandidate {

@@ -20,6 +20,7 @@ import {
 import { buildPushCandidates } from "../feishu/query.ts";
 import { mapToFeishuPayload } from "../feishu/mapper.ts";
 import { formatDryRun } from "../feishu/dry-run.ts";
+import { runExportCsv } from "../exporters/csv/export.ts";
 import type { Collector } from "../collectors/types.ts";
 
 const COLLECTORS: Record<string, Collector> = {
@@ -106,6 +107,21 @@ async function main() {
       process.stdout.write(
         formatEnrichGithubResult(result, parsed.confirm) + "\n",
       );
+      return;
+    }
+
+    if (parsed.kind === "export") {
+      // TB-5: --stdout streams directly to the user's pipe; otherwise we
+      // mint a fresh file under data/exports/. Wall-clock `now` keeps the
+      // default file name unique per second.
+      if (parsed.stdout) {
+        runExportCsv({ repo, out: process.stdout, now: () => new Date() });
+      } else {
+        const result = runExportCsv({ repo, now: () => new Date() });
+        // One-line confirmation so the operator knows where the file went;
+        // mirrors the "wrote X" feedback other commands give.
+        process.stdout.write(`Wrote ${result.path}\n`);
+      }
       return;
     }
 

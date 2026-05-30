@@ -264,3 +264,41 @@ test("HELP_TEXT mentions push-feishu", () => {
   expect(HELP_TEXT).toContain("push-feishu");
   expect(HELP_TEXT).toContain("--dry-run");
 });
+
+// --- export (TB-5) --------------------------------------------------------
+
+test("parseArgs export csv parses to a stdout-off default", () => {
+  expect(parseArgs(["export", "csv"])).toEqual({
+    kind: "export",
+    format: "csv",
+    stdout: false,
+  });
+});
+
+test("parseArgs export csv --stdout flips the stdout flag", () => {
+  expect(parseArgs(["export", "csv", "--stdout"])).toEqual({
+    kind: "export",
+    format: "csv",
+    stdout: true,
+  });
+});
+
+test("parseArgs export without a format positional is an error", () => {
+  const r = parseArgs(["export"]);
+  expect(r.kind).toBe("error");
+  if (r.kind === "error") {
+    expect(r.message).toMatch(/format is required/);
+  }
+});
+
+test("parseArgs export with an unknown format is an error", () => {
+  const r = parseArgs(["export", "jsonl"]);
+  expect(r.kind).toBe("error");
+  if (r.kind === "error") {
+    expect(r.message).toMatch(/unknown format/);
+  }
+});
+
+test("HELP_TEXT mentions export csv", () => {
+  expect(HELP_TEXT).toContain("export csv");
+});
