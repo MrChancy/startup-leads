@@ -8,6 +8,8 @@ import type {
   CompanyScoreInputView,
   DecisionCounts,
   FreshnessStatus,
+  GithubEnrichmentInput,
+  GithubOrgCandidate,
   LeadRepository,
   LeadScoreRecord,
   PurgeCounts,
@@ -32,6 +34,20 @@ import {
 // names use the alias-aware normalizeCompanyName instead.
 function normalizeTitle(name: string) {
   return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// Extract the first path segment after `github.com/` as an org slug.
+// `github.com/acme`        → "acme"
+// `github.com/acme/site`   → "acme"
+// `https://github.com/acme` → "acme"
+// Anything that doesn't look like a github URL → null.
+// We don't try to distinguish org vs. user accounts here — the GitHub API
+// returns 404 on /orgs/<user>/public_members and the enricher treats that
+// as "skip silently", which is exactly the same handling as a nonexistent
+// org. Keeps the parser one line of intent.
+function extractGithubOrgSlug(raw: string): string | null {
+  const match = raw.match(/github\.com\/([\w-]+)/i);
+  return match ? match[1]!.toLowerCase() : null;
 }
 
 // Partition direction tags into the legal subset (persisted) and rejected
@@ -322,6 +338,68 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
     [number]
   >(
     `SELECT source_id FROM company_domains WHERE id = ?`,
+  );
+
+  // ---- TB-10 github enricher statements -----------------------------------
+
+  // Discovery query: contacts whose source is NOT the enricher itself.
+  // We must exclude rows that the github enricher already wrote (those
+  // have source_type='github_profile') so re-running the enricher doesn't
+  // treat its own outputs (`github.com/<member-login>`) as new orgs to
+  // probe. The JOIN's LEFT-side guard catches contacts with NULL source
+  // (legacy / hand-seeded rows) so they still count as discovery signals.
+  const listGithubContactsStmt = db.prepare<
+    { company_id: number; value: string | null },
+    []
+  >(
+    `SELECT c.company_id, c.value FROM contacts c
+     LEFT JOIN sources s ON s.id = c.source_id
+     WHERE c.contact_type = 'github' AND c.value IS NOT NULL
+       AND (s.source_type IS NULL OR s.source_type != 'github_profile')
+     ORDER BY c.company_id, c.id`,
+  );
+
+  const insertGithubSourceStmt = db.prepare<
+    { id: number },
+    [string, string, string, string | null, string | null]
+  >(
+    `INSERT INTO sources
+       (source_type, source_url, retrieved_at, fetch_status, error_code, error_message)
+     VALUES ('github_profile', ?, ?, ?, ?, ?)
+     RETURNING id`,
+  );
+
+  // Dedup guard for re-runs: skip a contact if (company_id, contact_type,
+  // value) already exists. We can't use UNIQUE on the column because the
+  // collect path also writes contacts and that schema is shared with TB-1.
+  const existingContactStmt = db.prepare<
+    { id: number },
+    [number, string, string]
+  >(
+    `SELECT id FROM contacts
+     WHERE company_id = ? AND contact_type = ? AND value = ?
+     LIMIT 1`,
+  );
+
+  const insertGithubContactStmt = db.prepare<
+    void,
+    [
+      number,
+      string | null,
+      string,
+      string,
+      string | null,
+      number,
+      string,
+      number,
+      string,
+      string,
+    ]
+  >(
+    `INSERT INTO contacts
+       (company_id, name, contact_type, value, profile_url, source_id,
+        risk_level, priority_rank, row_created_at, row_updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
   return {
@@ -695,6 +773,85 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
       const result = upgradeJobStmt.run(to, sourceId, now, jobId);
       return result.changes > 0;
     },
+
+    // ---- TB-10 github enricher --------------------------------------------
+
+    listGithubOrgCandidates(): GithubOrgCandidate[] {
+      const rows = listGithubContactsStmt.all();
+      // Dedupe per (companyId, orgSlug); a company can leak multiple
+      // github URLs that resolve to the same org (the bare org URL plus
+      // org/site, etc.) and we want one probe per org per company.
+      const seen = new Set<string>();
+      const out: GithubOrgCandidate[] = [];
+      for (const row of rows) {
+        if (!row.value) continue;
+        const slug = extractGithubOrgSlug(row.value);
+        if (!slug) continue;
+        const key = `${row.company_id}\0${slug}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ companyId: row.company_id, orgSlug: slug });
+      }
+      return out;
+    },
+
+    recordGithubEnrichment: db.transaction(
+      (
+        input: GithubEnrichmentInput,
+      ): { sourceId: number; insertedCount: number } => {
+        const now = new Date().toISOString();
+        const sourceUrl = `https://api.github.com/orgs/${input.orgSlug}/public_members`;
+        const fetchStatus = input.fetchStatus;
+        const errorCode =
+          fetchStatus === "success" ? null : input.errorCode;
+        const errorMessage =
+          fetchStatus === "success" ? null : input.errorMessage;
+
+        const sourceRow = insertGithubSourceStmt.get(
+          sourceUrl,
+          now,
+          fetchStatus,
+          errorCode,
+          errorMessage,
+        );
+        if (!sourceRow) {
+          throw new Error(
+            "recordGithubEnrichment: INSERT did not return an id",
+          );
+        }
+        const sourceId = sourceRow.id;
+
+        let insertedCount = 0;
+        for (const c of input.contacts) {
+          // Idempotency: a re-run that sees the same (company, type, value)
+          // must NOT create a duplicate. We pre-check rather than relying
+          // on a UNIQUE constraint because the collect path already writes
+          // contacts under a shared schema (TB-1) and we don't want to
+          // change the legacy write to use ON CONFLICT.
+          const existing = existingContactStmt.get(
+            input.companyId,
+            c.contactType,
+            c.value,
+          );
+          if (existing) continue;
+          insertGithubContactStmt.run(
+            input.companyId,
+            c.name,
+            c.contactType,
+            c.value,
+            c.profileUrl,
+            sourceId,
+            c.riskLevel,
+            c.priorityRank,
+            now,
+            now,
+          );
+          insertedCount++;
+        }
+
+        return { sourceId, insertedCount };
+      },
+    ),
 
     getCompanyScoreInput(companyId: number, now: Date): CompanyScoreInputView {
       const company = selectCompanyForScoreStmt.get(companyId);
