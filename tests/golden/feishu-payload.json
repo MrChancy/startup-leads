@@ -1,0 +1,171 @@
+[
+  {
+    "localId": "company-1",
+    "fields": {
+      "Company": "Acme AI",
+      "Website": null,
+      "Domain": "hn:acme-ai",
+      "Direction Tags": [],
+      "Top Jobs": [
+        {
+          "title": "Backend Engineer",
+          "url": "https://news.ycombinator.com/item?id=42000010",
+          "location": null,
+          "remote_policy": "remote",
+          "freshness": "fresh",
+          "source_posted_at": null
+        }
+      ],
+      "Remote / Location": "remote",
+      "Freshness": "fresh",
+      "Score": 75,
+      "Scorer Version": "1.0.0",
+      "Match Reason": [
+        {
+          "component": "job_match",
+          "points": 35,
+          "evidence_source_id": null,
+          "note": "title:'Backend Engineer' matches backend engineer"
+        },
+        {
+          "component": "direction",
+          "points": 0,
+          "evidence_source_id": null,
+          "note": "no direction tags"
+        },
+        {
+          "component": "freshness",
+          "points": 15,
+          "evidence_source_id": null,
+          "note": "freshest job: fresh"
+        },
+        {
+          "component": "contact",
+          "points": 15,
+          "evidence_source_id": null,
+          "note": "best contact: email (risk=low)"
+        },
+        {
+          "component": "actionability",
+          "points": 5,
+          "evidence_source_id": null,
+          "note": "live fresh job: 'Backend Engineer'"
+        },
+        {
+          "component": "actionability",
+          "points": 5,
+          "evidence_source_id": null,
+          "note": "reachable contact (email, low)"
+        }
+      ],
+      "Recommended Contacts": [
+        {
+          "name": null,
+          "title": null,
+          "contact_type": "email",
+          "value": "jobs@acme.ai",
+          "profile_url": null,
+          "risk_level": "low",
+          "priority_rank": null
+        }
+      ],
+      "Contact Risk": "low",
+      "Sources": [
+        "https://news.ycombinator.com/item?id=42000010"
+      ],
+      "Status": "queued",
+      "Last Checked At": "<REDACTED:lastCheckedAt>",
+      "Local ID": "company-1",
+      "Review Notes": ""
+    }
+  },
+  {
+    "localId": "company-5",
+    "fields": {
+      "Company": "Epsilon Robotics",
+      "Website": null,
+      "Domain": "hn:epsilon-robotics",
+      "Direction Tags": [],
+      "Top Jobs": [
+        {
+          "title": "Backend Engineer",
+          "url": "https://news.ycombinator.com/item?id=42000014",
+          "location": null,
+          "remote_policy": "hybrid",
+          "freshness": "fresh",
+          "source_posted_at": null
+        }
+      ],
+      "Remote / Location": "hybrid",
+      "Freshness": "fresh",
+      "Score": 75,
+      "Scorer Version": "1.0.0",
+      "Match Reason": [
+        {
+          "component": "job_match",
+          "points": 35,
+          "evidence_source_id": null,
+          "note": "title:'Backend Engineer' matches backend engineer"
+        },
+        {
+          "component": "direction",
+          "points": 0,
+          "evidence_source_id": null,
+          "note": "no direction tags"
+        },
+        {
+          "component": "freshness",
+          "points": 15,
+          "evidence_source_id": null,
+          "note": "freshest job: fresh"
+        },
+        {
+          "component": "contact",
+          "points": 15,
+          "evidence_source_id": null,
+          "note": "best contact: email (risk=low)"
+        },
+        {
+          "component": "actionability",
+          "points": 5,
+          "evidence_source_id": null,
+          "note": "live fresh job: 'Backend Engineer'"
+        },
+        {
+          "component": "actionability",
+          "points": 5,
+          "evidence_source_id": null,
+          "note": "reachable contact (email, low)"
+        }
+      ],
+      "Recommended Contacts": [
+        {
+          "name": null,
+          "title": null,
+          "contact_type": "email",
+          "value": "hiring@epsilon.dev",
+          "profile_url": null,
+          "risk_level": "low",
+          "priority_rank": null
+        },
+        {
+          "name": null,
+          "title": null,
+          "contact_type": "linkedin",
+          "value": "linkedin.com/in/epsilon-recruit",
+          "profile_url": "https://linkedin.com/in/epsilon-recruit",
+          "risk_level": "medium",
+          "priority_rank": null
+        }
+      ],
+      "Contact Risk": "medium",
+      "Sources": [
+        "https://news.ycombinator.com/item?id=42000014"
+      ],
+      "Status": "queued",
+      "Last Checked At": "<REDACTED:lastCheckedAt>",
+      "Local ID": "company-5",
+      "Review Notes": ""
+    }
+  }
+]
