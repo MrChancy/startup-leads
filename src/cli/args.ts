@@ -13,6 +13,7 @@ export type ParsedArgs =
   | { kind: "purge"; mode: PurgeMode; confirm: boolean }
   | { kind: "enrich"; target: "careers" | "github"; confirm: boolean }
   | { kind: "push-feishu"; dryRun: boolean; minScore: number }
+  | { kind: "export"; format: "csv"; stdout: boolean }
   | { kind: "error"; message: string };
 
 export const HELP_TEXT = `startup-leads — local-first job lead CLI
@@ -31,6 +32,9 @@ Commands:
   push-feishu --dry-run [--min-score N]   Print the Feishu payload that WOULD be pushed
                                           for each candidate company (default min-score 70).
                                           v1 only supports --dry-run; real push lands in TB-8.
+  export csv [--stdout]                   Dump every scored company to a CSV file under
+                                          data/exports/<timestamp>.csv, or to stdout with
+                                          --stdout. Includes scorer_version for audit.
   purge --older-than <Nd> [--yes]         Delete rows older than the cutoff.
   purge --risk <list>     [--yes]         Delete contacts with the listed risk levels.
   purge --company <domain> [--yes]        Delete a single company and all its dependents.
@@ -116,7 +120,28 @@ export function parseArgs(argv: string[]): ParsedArgs {
     return parsePushFeishuArgs(rest);
   }
 
+  if (command === "export") {
+    return parseExportArgs(rest);
+  }
+
   return { kind: "error", message: `Unknown command: ${command ?? ""}` };
+}
+
+function parseExportArgs(rest: string[]): ParsedArgs {
+  // Format is positional (no default) so a future `jsonl` lands as a new
+  // positional rather than silently changing what `export` does.
+  const [format, ...flags] = rest;
+  if (!format) {
+    return {
+      kind: "error",
+      message: "export: format is required (e.g. `export csv`)",
+    };
+  }
+  if (format !== "csv") {
+    return { kind: "error", message: `export: unknown format "${format}"` };
+  }
+  const stdout = flags.includes("--stdout");
+  return { kind: "export", format: "csv", stdout };
 }
 
 function parsePushFeishuArgs(rest: string[]): ParsedArgs {

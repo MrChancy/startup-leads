@@ -6,11 +6,13 @@ import type {
   CareersSourceWrite,
   CollectedLead,
   CompanyScoreInputView,
+  CsvExportRow,
   DecisionCounts,
   FreshnessStatus,
   GithubEnrichmentInput,
   GithubOrgCandidate,
   LeadRepository,
+  LeadScoreDecision,
   LeadScoreMatchReasonEntry,
   LeadScoreRecord,
   PurgeCounts,
@@ -520,6 +522,91 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
      )
      AND s.source_url IS NOT NULL
      ORDER BY s.id`,
+  );
+
+  // TB-5 CSV export. Same S-4 latest-row pattern as pushCandidateStmt, but
+  // without the decision / score gates — the export covers EVERY scored
+  // company. ORDER BY score DESC then company_id ASC keeps the output
+  // byte-stable across runs (S-3).
+  const exportCandidateStmt = db.prepare<
+    {
+      company_id: number;
+      name: string;
+      description: string | null;
+      direction_tags: string | null;
+      score: number;
+      scorer_version: string;
+      decision: string;
+      match_reason: string;
+      created_at: string;
+    },
+    []
+  >(
+    `SELECT c.id AS company_id,
+            c.name,
+            c.description,
+            c.direction_tags,
+            ls.score,
+            ls.scorer_version,
+            ls.decision,
+            ls.match_reason,
+            ls.created_at
+     FROM lead_scores ls
+     JOIN companies c ON c.id = ls.company_id
+     WHERE ls.id = (
+       SELECT MAX(ls2.id) FROM lead_scores ls2
+       WHERE ls2.company_id = ls.company_id
+     )
+     ORDER BY ls.score DESC, c.id ASC`,
+  );
+
+  // Primary domain only (matches getPrimaryHttpDomain). Synthetic hn: keys
+  // stay because CSV is an audit dump — the reviewer wants the real value,
+  // not a sanitized one.
+  const exportDomainStmt = db.prepare<
+    { domain: string },
+    [number]
+  >(
+    `SELECT domain FROM company_domains
+     WHERE company_id = ?
+     ORDER BY is_primary DESC, id ASC
+     LIMIT 1`,
+  );
+
+  // ALL jobs for the company (no freshness filter — exporter rolls up).
+  const exportJobsStmt = db.prepare<
+    {
+      title: string | null;
+      location: string | null;
+      freshness_status: string | null;
+      source_posted_at: string | null;
+    },
+    [number]
+  >(
+    `SELECT title, location, freshness_status, source_posted_at
+     FROM jobs
+     WHERE company_id = ?
+     ORDER BY id`,
+  );
+
+  // ALL contacts (no risk filter — the exporter excludes 'blocked' itself
+  // for the "Recommended Contact" column, but the row count / surfacing
+  // logic might still want to see them in future). Blocked-risk contacts
+  // are rejected at upsert time, so in practice this returns low/medium/high.
+  const exportContactsStmt = db.prepare<
+    {
+      name: string | null;
+      contact_type: string | null;
+      value: string | null;
+      risk_level: string | null;
+      priority_rank: number | null;
+    },
+    [number]
+  >(
+    `SELECT name, contact_type, value, risk_level, priority_rank
+     FROM contacts
+     WHERE company_id = ?
+     ORDER BY id`,
   );
 
   function parseMatchReason(json: string): LeadScoreMatchReasonEntry[] {
@@ -1042,6 +1129,44 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
           sources,
           score: row.score,
           scorerVersion: row.scorer_version,
+          matchReason: parseMatchReason(row.match_reason),
+          lastCheckedAt: row.created_at,
+        };
+      });
+    },
+
+    listAllForExport(): CsvExportRow[] {
+      const rows = exportCandidateStmt.all();
+      return rows.map((row) => {
+        const domainRow = exportDomainStmt.get(row.company_id);
+        const jobs = exportJobsStmt.all(row.company_id).map((j) => ({
+          title: j.title ?? "",
+          location: j.location,
+          freshness:
+            (j.freshness_status as FreshnessStatus | null) ?? "unknown",
+          sourcePostedAt: j.source_posted_at,
+        }));
+        const contacts = exportContactsStmt.all(row.company_id).map((c) => ({
+          name: c.name,
+          contactType: c.contact_type ?? "",
+          value: c.value ?? "",
+          riskLevel: (c.risk_level as RiskLevel | null) ?? "low",
+          priorityRank: c.priority_rank,
+        }));
+        const directionTags = row.direction_tags
+          ? row.direction_tags.split(",").map((t) => t.trim()).filter(Boolean)
+          : [];
+        return {
+          companyId: row.company_id,
+          name: row.name,
+          domain: domainRow?.domain ?? null,
+          description: row.description,
+          directionTags,
+          jobs,
+          contacts,
+          score: row.score,
+          scorerVersion: row.scorer_version,
+          decision: row.decision as LeadScoreDecision,
           matchReason: parseMatchReason(row.match_reason),
           lastCheckedAt: row.created_at,
         };
