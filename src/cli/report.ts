@@ -69,32 +69,28 @@ function renderFullReport(
   cutoffIso?: string,
 ): string {
   const aggregate = repo.getReportStats(runs.map((r) => r.id));
+  // I-3 (CLAUDE.local.md): ReportStats has every field of
+  // ReportStatsAggregate verbatim (same names, same types) plus scope,
+  // runs, and the duplicate placeholder. Spread the aggregate so a future
+  // field added to ReportStatsAggregate flows through automatically — the
+  // previous explicit copy-by-field would have silently dropped it.
+  //
+  // `duplicate: 0` placeholder: see LeadScoreDecision comment at
+  // src/types/index.ts:65 — TB-4 follow-up will add the 'duplicate'
+  // decision to the enum and the matching aggregation; until then the
+  // column is structurally present so the operator sees a known-zero
+  // rather than a missing column.
+  const reportScope: ReportStats["scope"] =
+    scope.kind === "since"
+      ? { kind: "since", cutoff: cutoffIso ?? "" }
+      : scope.kind === "run"
+        ? { kind: "run", runId: scope.runId }
+        : { kind: "latest" };
   const stats: ReportStats = {
-    scope:
-      scope.kind === "since"
-        ? { kind: "since", cutoff: cutoffIso ?? "" }
-        : scope.kind === "run"
-          ? { kind: "run", runId: scope.runId }
-          : { kind: "latest" },
+    ...aggregate,
+    scope: reportScope,
     runs,
-    totalCandidates: aggregate.totalCandidates,
-    totalStored: aggregate.totalStored,
-    totalDeduped: aggregate.totalDeduped,
-    totalFetchFailed: aggregate.totalFetchFailed,
-    totalParseFailed: aggregate.totalParseFailed,
-    decisions: aggregate.decisions,
-    // See LeadScoreDecision comment in src/types/index.ts (line ~65): the
-    // 'duplicate' decision is a TB-4 follow-up, not in the current enum.
-    // Until it lands we surface 0 so the report column is structurally
-    // complete and the operator can recognize it as a known-zero rather
-    // than a missing column.
     duplicate: 0,
-    companiesWithContact: aggregate.companiesWithContact,
-    totalCompanies: aggregate.totalCompanies,
-    jobsByFreshness: aggregate.jobsByFreshness,
-    totalJobs: aggregate.totalJobs,
-    scoreBuckets: aggregate.scoreBuckets,
-    scorerVersionGroups: aggregate.scorerVersionGroups,
   };
   return formatFullReport(stats);
 }
