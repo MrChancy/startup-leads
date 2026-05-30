@@ -201,3 +201,66 @@ test("parseArgs enrich github --yes flips confirm", () => {
     confirm: true,
   });
 });
+
+// --- push-feishu (TB-6) ---------------------------------------------------
+
+test("parseArgs push-feishu --dry-run defaults min-score to 70", () => {
+  expect(parseArgs(["push-feishu", "--dry-run"])).toEqual({
+    kind: "push-feishu",
+    dryRun: true,
+    minScore: 70,
+  });
+});
+
+test("parseArgs push-feishu --dry-run --min-score 80 parses", () => {
+  expect(parseArgs(["push-feishu", "--dry-run", "--min-score", "80"])).toEqual({
+    kind: "push-feishu",
+    dryRun: true,
+    minScore: 80,
+  });
+});
+
+test("parseArgs push-feishu without --dry-run is an error in v1", () => {
+  // Real push lives in TB-8 (HITL). Refusing the non-dry-run mode here
+  // prevents accidentally trying to push without TB-7/TB-8 in place.
+  const r = parseArgs(["push-feishu"]);
+  expect(r.kind).toBe("error");
+  if (r.kind === "error") {
+    expect(r.message).toMatch(/--dry-run/);
+    expect(r.message).toMatch(/TB-8|v1/);
+  }
+});
+
+test("parseArgs push-feishu --min-score with no value errors (A-3)", () => {
+  const r = parseArgs(["push-feishu", "--dry-run", "--min-score"]);
+  expect(r.kind).toBe("error");
+  if (r.kind === "error") {
+    expect(r.message).toMatch(/--min-score/);
+  }
+});
+
+test("parseArgs push-feishu --min-score followed by another flag errors (A-2)", () => {
+  const r = parseArgs(["push-feishu", "--min-score", "--dry-run"]);
+  expect(r.kind).toBe("error");
+  if (r.kind === "error") {
+    expect(r.message).toMatch(/--min-score/);
+  }
+});
+
+test("parseArgs push-feishu --min-score non-numeric errors", () => {
+  const r = parseArgs(["push-feishu", "--dry-run", "--min-score", "abc"]);
+  expect(r.kind).toBe("error");
+  if (r.kind === "error") {
+    expect(r.message).toMatch(/--min-score/);
+  }
+});
+
+test("parseArgs push-feishu --min-score negative errors", () => {
+  const r = parseArgs(["push-feishu", "--dry-run", "--min-score", "-1"]);
+  expect(r.kind).toBe("error");
+});
+
+test("HELP_TEXT mentions push-feishu", () => {
+  expect(HELP_TEXT).toContain("push-feishu");
+  expect(HELP_TEXT).toContain("--dry-run");
+});

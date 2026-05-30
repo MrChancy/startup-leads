@@ -304,4 +304,65 @@ export interface LeadRepository {
   recordGithubEnrichment(
     input: GithubEnrichmentInput,
   ): { sourceId: number; insertedCount: number };
+
+  // TB-6 feishu push candidates. Read-only — no transaction needed.
+  // Returns one row per company whose LATEST lead_scores row clears the
+  // exclusion + score gates. "Latest" means MAX(lead_scores.id) per
+  // company; the SQL filters on that latest row only (S-4 — earlier
+  // accepted rows must NOT resurrect a now-stale company).
+  //
+  // Per spec § 推送行为规则:
+  //   - decision NOT IN ('stale', 'blocked_contact', 'excluded_by_rule')
+  //   - score >= minScore
+  //   - jobs filtered to freshness IN ('fresh', 'usable') — unknown is
+  //     excluded unless a careers/github enricher upgraded it to usable.
+  //   - blocked-risk contacts are already filtered at write time
+  //     (upsertCollectedLead skips them); this query does not need to
+  //     re-filter.
+  //
+  // Caller is responsible for any further mapping (top-3 truncation,
+  // payload assembly). Reading per-company jobs/contacts/sources is N+1
+  // but candidate counts are small (push thresholds keep them in the
+  // dozens, not thousands) so a JOIN-heavy single query would trade
+  // clarity for no measurable win.
+  listPushCandidates(query: PushCandidateQuery): PushCandidate[];
+}
+
+export interface PushCandidateQuery {
+  minScore: number;
+}
+
+export interface PushCandidate {
+  companyId: number;
+  name: string;
+  domain: string | null;
+  description: string | null;
+  directionTags: readonly string[];
+  jobs: ReadonlyArray<{
+    title: string;
+    jobUrl: string | null;
+    location: string | null;
+    remotePolicy: string | null;
+    freshness: FreshnessStatus;
+    sourcePostedAt: string | null;
+  }>;
+  contacts: ReadonlyArray<{
+    name: string | null;
+    title: string | null;
+    contactType: string;
+    value: string;
+    profileUrl: string | null;
+    riskLevel: RiskLevel;
+    priorityRank: number | null;
+  }>;
+  // Source URLs ("https://news.ycombinator.com/item?id=...", careers page,
+  // etc.) collected from the sources table. Distinct + ordered by id so
+  // the dry-run output is stable across runs.
+  sources: readonly string[];
+  score: number;
+  scorerVersion: string;
+  matchReason: readonly LeadScoreMatchReasonEntry[];
+  // ISO timestamp of the latest lead_scores row's created_at. Spec
+  // "Last Checked At".
+  lastCheckedAt: string;
 }

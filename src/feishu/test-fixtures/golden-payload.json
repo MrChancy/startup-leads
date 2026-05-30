@@ -1,0 +1,76 @@
+{
+  "localId": "company-42",
+  "fields": {
+    "Company": "Acme AI",
+    "Website": "https://acme.ai",
+    "Domain": "acme.ai",
+    "Direction Tags": [
+      "ai-app",
+      "backend"
+    ],
+    "Top Jobs": [
+      {
+        "title": "Backend Engineer",
+        "url": "https://acme.ai/jobs/be",
+        "location": "Berlin",
+        "remote_policy": "remote-friendly",
+        "freshness": "fresh",
+        "source_posted_at": "2026-05-20T00:00:00.000Z"
+      },
+      {
+        "title": "ML Engineer",
+        "url": "https://acme.ai/jobs/ml",
+        "location": "Berlin",
+        "remote_policy": "remote-friendly",
+        "freshness": "usable",
+        "source_posted_at": "2026-05-15T00:00:00.000Z"
+      }
+    ],
+    "Remote / Location": "Remote-friendly · Berlin",
+    "Freshness": "fresh",
+    "Score": 82,
+    "Scorer Version": "1.0.0",
+    "Match Reason": [
+      {
+        "component": "job_match",
+        "points": 35,
+        "evidence_source_id": 7,
+        "note": "title:'Backend Engineer' matches backend engineer"
+      },
+      {
+        "component": "freshness",
+        "points": 15,
+        "evidence_source_id": 7,
+        "note": "freshest job: fresh"
+      }
+    ],
+    "Recommended Contacts": [
+      {
+        "name": "Alice",
+        "title": "CTO",
+        "contact_type": "email",
+        "value": "alice@acme.ai",
+        "profile_url": null,
+        "risk_level": "low",
+        "priority_rank": 1
+      },
+      {
+        "name": "Bob",
+        "title": null,
+        "contact_type": "github",
+        "value": "https://github.com/bob",
+        "profile_url": "https://github.com/bob",
+        "risk_level": "low",
+        "priority_rank": 2
+      }
+    ],
+    "Contact Risk": "low",
+    "Sources": [
+      "https://news.ycombinator.com/item?id=999"
+    ],
+    "Status": "queued",
+    "Last Checked At": "2026-05-30T00:00:00.000Z",
+    "Local ID": "company-42",
+    "Review Notes": ""
+  }
+}
