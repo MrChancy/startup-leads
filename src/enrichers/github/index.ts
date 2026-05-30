@@ -136,17 +136,18 @@ export async function runEnrichGithub(
   let rateLimited = false;
 
   for (const cand of candidates) {
-    if (rateLimited) {
-      // Skip the network entirely, persist the deferred marker, move on.
-      recordDeferred(repo, cand, "rate_limited", "rate limit hit earlier in run");
-      result.companiesDeferred++;
-      continue;
-    }
-
-    // T-2: per-company try/catch so one unexpected throw doesn't abort
-    // the loop or leave the runs row stuck on 'partial' for an unrelated
-    // reason.
+    // T-2: per-company try/catch wraps BOTH the rate-limited skip branch
+    // and the real processCompany call. A throw in the skip branch's
+    // recordDeferred write (disk full, FK violation) must not abort the
+    // loop — remaining companies still need their deferred markers.
     try {
+      if (rateLimited) {
+        // Skip the network entirely, persist the deferred marker, move on.
+        recordDeferred(repo, cand, "rate_limited", "rate limit hit earlier in run");
+        result.companiesDeferred++;
+        continue;
+      }
+
       const outcome = await processCompany({
         repo,
         http,
@@ -260,7 +261,12 @@ async function processCompany(args: ProcessCompanyArgs): Promise<ProcessOutcome>
       }
       // A single profile 404 / transient failure: skip that profile,
       // continue with the rest. We don't want one ghost account to defer
-      // an entire org's worth of contacts.
+      // an entire org's worth of contacts. T-2 forbids silent `void err`
+      // — surface the failure on stderr so a flood of profile errors is
+      // visible (e.g. a parser bug masquerading as 404s).
+      process.stderr.write(
+        `enrich github: profile ${m.login} failed — ${errorMessage(err)}\n`,
+      );
       continue;
     }
   }

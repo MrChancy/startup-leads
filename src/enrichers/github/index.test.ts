@@ -589,6 +589,140 @@ test("per-company try/catch: one company's unexpected error doesn't abort the ru
   expect(result.orgsProbed).toBe(2);
 });
 
+test("T-2: a recordDeferred throw in the rate-limited skip branch does NOT abort the loop", async () => {
+  // pr-review LOW #1 (CLAUDE.local.md T-2): once the first company trips
+  // the rate limit, every subsequent company hits a tiny "skip branch"
+  // that writes a deferred sources row. If THAT write throws (disk full,
+  // FK violation, anything), the loop must keep going and the remaining
+  // companies must still get their deferred markers — same per-item
+  // guarantee the "real processCompany" branch already enjoys.
+  const { repo, db } = createInMemoryRepository();
+  const run = repo.startRun({ source: "test", limit: 1 });
+  // Three orgs: A trips rate limit on its members fetch; B's skip-branch
+  // deferred write blows up; C must still get its deferred marker.
+  repo.upsertCollectedLead(
+    lead({
+      companyName: "A",
+      domain: "a.co",
+      contacts: [
+        { contactType: "github", value: "github.com/a-org", riskLevel: "medium" },
+      ],
+    }),
+    run.id,
+  );
+  repo.upsertCollectedLead(
+    lead({
+      companyName: "B",
+      domain: "b.co",
+      contacts: [
+        { contactType: "github", value: "github.com/b-org", riskLevel: "medium" },
+      ],
+    }),
+    run.id,
+  );
+  repo.upsertCollectedLead(
+    lead({
+      companyName: "C",
+      domain: "c.co",
+      contacts: [
+        { contactType: "github", value: "github.com/c-org", riskLevel: "medium" },
+      ],
+    }),
+    run.id,
+  );
+
+  const { client } = makeFakeHttpClient({
+    // GitHub's unauth rate-limit returns 403 with body mentioning "rate limit"
+    // (see AC6b); that's the shape isRateLimitError recognises from a single
+    // non-retried response (HttpClient doesn't retry 403).
+    [membersUrl("a-org")]: {
+      status: 403,
+      body: '{"message":"API rate limit exceeded for IP 1.2.3.4"}',
+    },
+    // b-org / c-org members URLs are never called — they're in the skip
+    // branch. Leaving them unmapped is the strongest assertion that we
+    // never re-hit the API after the rate-limit flag is set.
+  });
+
+  // Wrap recordGithubEnrichment so only B's deferred write throws.
+  const orig = repo.recordGithubEnrichment.bind(repo);
+  repo.recordGithubEnrichment = (input) => {
+    if (input.fetchStatus === "deferred" && input.orgSlug === "b-org") {
+      throw new Error("simulated disk-full on B's deferred write");
+    }
+    return orig(input);
+  };
+
+  const result = await runEnrichGithub({
+    repo,
+    http: client,
+    confirm: true,
+    now: () => new Date(),
+    env: {},
+  });
+
+  // A: deferred via 429 path. B: error (forced throw). C: deferred via skip.
+  expect(result.companyErrors).toBe(1);
+  const deferredRows = db
+    .query<{ c: number }, []>(
+      "SELECT COUNT(*) AS c FROM sources WHERE source_type='github_profile' AND fetch_status='deferred'",
+    )
+    .get();
+  expect(deferredRows?.c).toBe(2);
+  // Runs row reflects mixed outcome.
+  const runStatus = db
+    .query<{ status: string }, [string]>(
+      "SELECT status FROM runs WHERE id = ?",
+    )
+    .get(result.runId!)?.status;
+  expect(runStatus).toBe("partial");
+});
+
+test("T-2: a per-profile fetch failure mid-org is logged to stderr (no silent void err)", async () => {
+  // pr-review LOW #2 (CLAUDE.local.md T-2): "不要 void err" — swallowing
+  // a profile-fetch exception with bare `continue` hides real bugs
+  // (e.g. a parser crash masquerading as a network failure). The catch
+  // must at minimum stderr-log the failure so operators see it.
+  const { repo } = createInMemoryRepository();
+  const run = repo.startRun({ source: "test", limit: 1 });
+  repo.upsertCollectedLead(lead(), run.id);
+
+  const members = JSON.stringify([
+    { login: "good-user", html_url: "https://github.com/good-user" },
+    { login: "ghost-user", html_url: "https://github.com/ghost-user" },
+  ]);
+  const { client } = makeFakeHttpClient({
+    [membersUrl("acme-ai")]: members,
+    [profileUrl("good-user")]: loadFixture("profile-with-email.json"),
+    [profileUrl("ghost-user")]: {
+      status: 500,
+      body: '{"message":"server panic"}',
+    },
+  });
+
+  const writes: string[] = [];
+  const origWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    await runEnrichGithub({
+      repo,
+      http: client,
+      confirm: true,
+      now: () => new Date(),
+      env: {},
+    });
+  } finally {
+    process.stderr.write = origWrite;
+  }
+
+  // The failure must appear on stderr in some recognisable form.
+  expect(writes.some((w) => w.includes("ghost-user"))).toBe(true);
+});
+
 test("404 from org call (private/user account) is silent, not an error", async () => {
   // GitHub returns 404 when the slug is a user or a private org. We treat
   // that as "nothing to enrich here" — not a failure — so the runs row
