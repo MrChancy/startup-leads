@@ -11,8 +11,11 @@ import type {
   GithubEnrichmentInput,
   GithubOrgCandidate,
   LeadRepository,
+  LeadScoreMatchReasonEntry,
   LeadScoreRecord,
   PurgeCounts,
+  PushCandidate,
+  PushCandidateQuery,
   RiskLevel,
   RunCounts,
   RunRecord,
@@ -401,6 +404,148 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
         risk_level, priority_rank, row_created_at, row_updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+
+  // ---- TB-6 feishu push candidates -------------------------------------
+
+  // Latest-score-per-company query. S-4: the subselect filters on
+  // company_id and we pick MAX(id) within that scope. The outer WHERE
+  // then rejects the latest row by decision / score. A company whose
+  // latest row is stale (regardless of older accepted rows) won't match.
+  const pushCandidateStmt = db.prepare<
+    {
+      company_id: number;
+      name: string;
+      description: string | null;
+      direction_tags: string | null;
+      score: number;
+      scorer_version: string;
+      match_reason: string;
+      created_at: string;
+    },
+    [number]
+  >(
+    `SELECT c.id AS company_id,
+            c.name,
+            c.description,
+            c.direction_tags,
+            ls.score,
+            ls.scorer_version,
+            ls.match_reason,
+            ls.created_at
+     FROM lead_scores ls
+     JOIN companies c ON c.id = ls.company_id
+     WHERE ls.id = (
+       SELECT MAX(ls2.id) FROM lead_scores ls2
+       WHERE ls2.company_id = ls.company_id
+     )
+       AND ls.decision NOT IN ('stale', 'blocked_contact', 'excluded_by_rule')
+       AND ls.score >= ?
+     ORDER BY c.id`,
+  );
+
+  // Primary domain first (matches getPrimaryHttpDomain), but we want the
+  // string itself for the payload — including synthetic hn: keys because
+  // the Feishu record still wants SOMETHING to display rather than blank.
+  // Caller knows hn:hash isn't a clickable domain; the mapper renders it
+  // as-is and the human reviewer decides.
+  const pushDomainStmt = db.prepare<
+    { domain: string },
+    [number]
+  >(
+    `SELECT domain FROM company_domains
+     WHERE company_id = ?
+     ORDER BY is_primary DESC, id ASC
+     LIMIT 1`,
+  );
+
+  // Jobs for the payload: filter freshness to fresh/usable per spec
+  // ("unknown 新鲜度默认排除"). The mapper will then truncate to top 3.
+  // We return ALL matching jobs so the mapper's sort sees the full set;
+  // pre-truncating in SQL would bake the sort order into the query and
+  // make a future tweak require a schema-level change.
+  const pushJobsStmt = db.prepare<
+    {
+      title: string | null;
+      job_url: string | null;
+      location: string | null;
+      remote_policy: string | null;
+      freshness_status: string | null;
+      source_posted_at: string | null;
+    },
+    [number]
+  >(
+    `SELECT title, job_url, location, remote_policy, freshness_status, source_posted_at
+     FROM jobs
+     WHERE company_id = ?
+       AND freshness_status IN ('fresh', 'usable')
+     ORDER BY id`,
+  );
+
+  // Contacts: blocked-risk rows were already filtered at upsertCollectedLead
+  // time so this query trusts the table. Returning everything keeps the
+  // mapper free to apply the priority_rank → risk_level sort.
+  const pushContactsStmt = db.prepare<
+    {
+      name: string | null;
+      title: string | null;
+      contact_type: string | null;
+      value: string | null;
+      profile_url: string | null;
+      risk_level: string | null;
+      priority_rank: number | null;
+    },
+    [number]
+  >(
+    `SELECT name, title, contact_type, value, profile_url, risk_level, priority_rank
+     FROM contacts
+     WHERE company_id = ?
+     ORDER BY id`,
+  );
+
+  // Source URLs as evidence for the Feishu record. DISTINCT on URL so a
+  // company touched by N collectors doesn't list the same HN thread N times;
+  // ordered by id so the output is stable across runs (S-3 idempotency).
+  const pushSourcesStmt = db.prepare<
+    { source_url: string | null },
+    [number, number, number]
+  >(
+    `SELECT DISTINCT s.source_url
+     FROM sources s
+     WHERE s.id IN (
+       SELECT source_id FROM company_domains WHERE company_id = ? AND source_id IS NOT NULL
+       UNION
+       SELECT source_id FROM jobs            WHERE company_id = ? AND source_id IS NOT NULL
+       UNION
+       SELECT source_id FROM contacts        WHERE company_id = ? AND source_id IS NOT NULL
+     )
+     AND s.source_url IS NOT NULL
+     ORDER BY s.id`,
+  );
+
+  function parseMatchReason(json: string): LeadScoreMatchReasonEntry[] {
+    // The DB stores snake_case keys (per writeLeadScore); revert to camelCase
+    // for the public DTO so callers don't need to know about the on-disk
+    // shape.
+    try {
+      const parsed = JSON.parse(json) as Array<{
+        component: string;
+        points: number;
+        evidence_source_id: number | null;
+        note: string;
+      }>;
+      return parsed.map((entry) => ({
+        component: entry.component,
+        points: entry.points,
+        evidenceSourceId: entry.evidence_source_id,
+        note: entry.note,
+      }));
+    } catch {
+      // A corrupt match_reason shouldn't break the whole listing; surface
+      // an empty array so the row still goes through and the operator sees
+      // "no reasons" rather than a crash.
+      return [];
+    }
+  }
 
   return {
     withTransaction<T>(fn: () => T): T {
@@ -852,6 +997,56 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
         return { sourceId, insertedCount };
       },
     ),
+
+    listPushCandidates(query: PushCandidateQuery): PushCandidate[] {
+      const rows = pushCandidateStmt.all(query.minScore);
+      return rows.map((row) => {
+        const domainRow = pushDomainStmt.get(row.company_id);
+        const jobs = pushJobsStmt.all(row.company_id).map((j) => ({
+          title: j.title ?? "",
+          jobUrl: j.job_url,
+          location: j.location,
+          remotePolicy: j.remote_policy,
+          // The IN ('fresh', 'usable') guard in pushJobsStmt means we never
+          // see unknown/stale here; the cast is therefore safe but we
+          // default defensively in case a future migration loosens the
+          // WHERE clause.
+          freshness:
+            (j.freshness_status as FreshnessStatus | null) ?? "unknown",
+          sourcePostedAt: j.source_posted_at,
+        }));
+        const contacts = pushContactsStmt.all(row.company_id).map((c) => ({
+          name: c.name,
+          title: c.title,
+          contactType: c.contact_type ?? "",
+          value: c.value ?? "",
+          profileUrl: c.profile_url,
+          riskLevel: (c.risk_level as RiskLevel | null) ?? "low",
+          priorityRank: c.priority_rank,
+        }));
+        const sources = pushSourcesStmt
+          .all(row.company_id, row.company_id, row.company_id)
+          .map((s) => s.source_url)
+          .filter((url): url is string => url !== null);
+        const directionTags = row.direction_tags
+          ? row.direction_tags.split(",").map((t) => t.trim()).filter(Boolean)
+          : [];
+        return {
+          companyId: row.company_id,
+          name: row.name,
+          domain: domainRow?.domain ?? null,
+          description: row.description,
+          directionTags,
+          jobs,
+          contacts,
+          sources,
+          score: row.score,
+          scorerVersion: row.scorer_version,
+          matchReason: parseMatchReason(row.match_reason),
+          lastCheckedAt: row.created_at,
+        };
+      });
+    },
 
     getCompanyScoreInput(companyId: number, now: Date): CompanyScoreInputView {
       const company = selectCompanyForScoreStmt.get(companyId);

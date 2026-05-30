@@ -17,6 +17,9 @@ import {
   formatEnrichGithubResult,
   runEnrichGithub,
 } from "../enrichers/github/index.ts";
+import { buildPushCandidates } from "../feishu/query.ts";
+import { mapToFeishuPayload } from "../feishu/mapper.ts";
+import { formatDryRun } from "../feishu/dry-run.ts";
 import type { Collector } from "../collectors/types.ts";
 
 const COLLECTORS: Record<string, Collector> = {
@@ -102,6 +105,23 @@ async function main() {
       });
       process.stdout.write(
         formatEnrichGithubResult(result, parsed.confirm) + "\n",
+      );
+      return;
+    }
+
+    if (parsed.kind === "push-feishu") {
+      // v1: dry-run only. parseArgs already rejects the non-dry-run path,
+      // so we never reach here without parsed.dryRun === true. We DELIBERATELY
+      // do not construct LarkCliFeishuClient (TB-7) or write push_events
+      // (TB-8) — dry-run only reads. Verify by `SELECT COUNT(*) FROM
+      // push_events` after running this branch.
+      const leads = buildPushCandidates({
+        repo,
+        minScore: parsed.minScore,
+      });
+      const payloads = leads.map((lead) => mapToFeishuPayload(lead));
+      process.stdout.write(
+        formatDryRun(payloads, { minScore: parsed.minScore }) + "\n",
       );
       return;
     }

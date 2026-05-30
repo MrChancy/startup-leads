@@ -12,6 +12,7 @@ export type ParsedArgs =
   | { kind: "report"; runId: string }
   | { kind: "purge"; mode: PurgeMode; confirm: boolean }
   | { kind: "enrich"; target: "careers" | "github"; confirm: boolean }
+  | { kind: "push-feishu"; dryRun: boolean; minScore: number }
   | { kind: "error"; message: string };
 
 export const HELP_TEXT = `startup-leads — local-first job lead CLI
@@ -27,6 +28,9 @@ Commands:
   enrich github  [--yes]                  Pull public GitHub org member profiles for any
                                           company with a github.com/<org> contact and
                                           record evidence-backed contacts (dry-run otherwise).
+  push-feishu --dry-run [--min-score N]   Print the Feishu payload that WOULD be pushed
+                                          for each candidate company (default min-score 70).
+                                          v1 only supports --dry-run; real push lands in TB-8.
   purge --older-than <Nd> [--yes]         Delete rows older than the cutoff.
   purge --risk <list>     [--yes]         Delete contacts with the listed risk levels.
   purge --company <domain> [--yes]        Delete a single company and all its dependents.
@@ -108,7 +112,45 @@ export function parseArgs(argv: string[]): ParsedArgs {
     return parseEnrichArgs(rest);
   }
 
+  if (command === "push-feishu") {
+    return parsePushFeishuArgs(rest);
+  }
+
   return { kind: "error", message: `Unknown command: ${command ?? ""}` };
+}
+
+function parsePushFeishuArgs(rest: string[]): ParsedArgs {
+  // v1 only supports dry-run. Refusing the non-dry-run mode here means a
+  // user who runs `push-feishu` against an empty TB-8 stack gets a clean
+  // error rather than a silent no-op or a half-wired push attempt.
+  const dryRunFlag = readFlagSafe(rest, "--dry-run");
+  if (!dryRunFlag.present) {
+    return {
+      kind: "error",
+      message:
+        "push-feishu: --dry-run is required in v1 (real push lands in TB-8)",
+    };
+  }
+  const minScoreFlag = readFlagSafe(rest, "--min-score");
+  if (minScoreFlag.present && minScoreFlag.value === null) {
+    return {
+      kind: "error",
+      message:
+        "push-feishu: --min-score requires a non-negative integer (e.g. --min-score 70)",
+    };
+  }
+  // Spec § 飞书推送阈值 default. parsePushFeishuArgs is the single source
+  // of truth for the threshold so the CLI and any future caller agree.
+  const minScore = minScoreFlag.present
+    ? Number.parseInt(minScoreFlag.value as string, 10)
+    : 70;
+  if (Number.isNaN(minScore) || minScore < 0) {
+    return {
+      kind: "error",
+      message: "push-feishu: --min-score must be a non-negative integer",
+    };
+  }
+  return { kind: "push-feishu", dryRun: true, minScore };
 }
 
 function parseEnrichArgs(rest: string[]): ParsedArgs {
