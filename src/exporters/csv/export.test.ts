@@ -314,6 +314,37 @@ test("file mode writes data/exports/<timestamp>.csv with the same content", () =
   }
 });
 
+// ---- M1: intra-second collision must not silently overwrite -------------
+
+test("two file exports with the same injected `now` error instead of silently overwriting", () => {
+  // pr-review TB-5 M1: two invocations within the same wall-clock second
+  // resolve to the same `<dir>/<YYYY-MM-DDTHH-mm-ss>.csv`. writeFileSync
+  // with the default 'w' flag silently overwrites — the first export's
+  // bytes are lost with no signal. The contract must be: second call
+  // fails loud with a clear message (so the operator either picks --stdout
+  // or waits one second), NOT silent data loss.
+  const { repo } = createInMemoryRepository();
+  const dir = tempDir();
+  try {
+    const first = runExportCsv({
+      repo,
+      now: () => FROZEN_NOW,
+      outputDir: dir,
+    });
+    expect(first.path).not.toBeNull();
+    // Same `now` → same slug → would overwrite. Must throw.
+    expect(() =>
+      runExportCsv({
+        repo,
+        now: () => FROZEN_NOW,
+        outputDir: dir,
+      }),
+    ).toThrow(/already exists/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---- S-3 idempotency: two calls with the same frozen `now` are byte-equal
 
 test("two exports with the same injected `now` produce byte-identical CSV (S-3)", () => {

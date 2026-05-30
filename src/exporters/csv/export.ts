@@ -184,6 +184,20 @@ export function runExportCsv(input: RunExportCsvInput): RunExportCsvResult {
   const path = join(dir, `${timestampSlug(input.now())}.csv`);
   // Synchronous write keeps runExportCsv synchronous so the CLI top-level
   // doesn't need to await and tests can read the file back immediately.
-  writeFileSync(path, buf);
+  // pr-review TB-5 M1: open exclusively (wx) so two invocations within
+  // the same wall-clock second fail loud instead of silently overwriting
+  // the first export's bytes (the slug only has second-resolution).
+  try {
+    writeFileSync(path, buf, { flag: "wx" });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") {
+      throw new Error(
+        `Refusing to overwrite existing export: ${path} already exists. ` +
+          `Wait a second and retry, or use --stdout to pipe to a different sink.`,
+      );
+    }
+    throw err;
+  }
   return { path };
 }
