@@ -1,0 +1,33 @@
+name: CI
+
+# v1 验收: bun test / typecheck / lint / e2e all green on every push to main
+# and every PR. No secrets needed — the e2e drives the HN collector via local
+# fixtures (src/collectors/hn/test-fixtures/) through a fake HttpClient, so no
+# network call leaves the runner. (CLAUDE.local.md W-4 does NOT apply here.)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      # Don't cancel the other OS on first failure — we want both signals.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Pinned to the version on the maintainer's laptop. Bump deliberately
+          # alongside any change that depends on a newer bun runtime feature;
+          # treat a bump as a `chore:` commit with the rationale in the body.
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run typecheck
+      - run: bun run lint
+      - run: bun run e2e
