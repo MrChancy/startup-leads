@@ -60,8 +60,14 @@ async function main() {
     }
 
     if (parsed.kind === "report") {
-      const result = runReport({ repo, runId: parsed.runId });
+      const result = runReport({
+        repo,
+        scope: parsed.scope,
+        now: () => new Date(),
+      });
       if (!result.found) {
+        // I-2: only --run <missing-id> reaches found=false. Latest /
+        // since-mode with no runs is a success with a friendly message.
         process.stderr.write(result.line + "\n");
         close();
         process.exit(1);

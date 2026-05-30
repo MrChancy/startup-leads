@@ -104,6 +104,72 @@ export interface DecisionCounts {
   excludedByRule: number;
 }
 
+// TB-11 full report types ---------------------------------------------------
+//
+// `ReportScope` describes which runs the report aggregates. The CLI resolves
+// the user's flags into one of these three shapes; the repo and renderer
+// only ever see the resolved scope, so neither needs to know about
+// `--run`/`--since` parsing.
+export interface ReportScopeLatest {
+  kind: "latest";
+}
+export interface ReportScopeRun {
+  kind: "run";
+  runId: string;
+}
+export interface ReportScopeSince {
+  kind: "since";
+  // ISO timestamp (computed by CLI as now - parseAge(--since)). Storage
+  // queries compare started_at >= cutoff.
+  cutoff: string;
+}
+export type ReportScope =
+  | ReportScopeLatest
+  | ReportScopeRun
+  | ReportScopeSince;
+
+// One bin in the score distribution. Both bounds are inclusive on the low
+// side; hi=null means "no upper bound" (the 85+ bucket).
+export interface ScoreBucket {
+  label: string;
+  lo: number;
+  hi: number | null;
+  count: number;
+}
+
+// Per-scorer-version subtotal. A normal report shows one row (everyone on
+// the current SCORER_VERSION); after a version bump the report will show
+// both old and new while history is still present.
+export interface ScorerVersionGroup {
+  scorerVersion: string;
+  decisions: DecisionCounts;
+  total: number;
+}
+
+// The renderer's single input. All aggregation is done before this struct
+// is built; `formatFullReport` is a pure string function.
+export interface ReportStats {
+  scope: ReportScope;
+  runs: RunRecord[];
+  totalCandidates: number;
+  totalStored: number;
+  totalDeduped: number;
+  totalFetchFailed: number;
+  totalParseFailed: number;
+  decisions: DecisionCounts;
+  // Placeholder: LeadScoreDecision has no 'duplicate' value yet (see the
+  // comment on LeadScoreDecision above — TB-4 follow-up will add it). Until
+  // then this counter stays 0 so the report column is structurally complete
+  // and future scorer changes don't require touching the renderer.
+  duplicate: number;
+  companiesWithContact: number;
+  totalCompanies: number;
+  jobsByFreshness: Record<FreshnessStatus, number>;
+  totalJobs: number;
+  scoreBuckets: ScoreBucket[];
+  scorerVersionGroups: ScorerVersionGroup[];
+}
+
 // Row counts touched (or that would be touched in preview) by a purge call.
 // Keys mirror SQLite table names so CLI output / aggregations can iterate
 // without a separate name map. `sources` is always 0 — purge never deletes
@@ -218,10 +284,42 @@ export interface CompanyScoreInputView {
   now: Date;
 }
 
+// Aggregated stats returned by `getReportStats`. Identical to the inner
+// fields of ReportStats minus the scope-describing fields the CLI layer
+// owns (`scope`, `runs`, `duplicate` placeholder). Kept as its own type
+// so the repo never has to know about ReportScope / RunRecord-construction.
+export interface ReportStatsAggregate {
+  totalCandidates: number;
+  totalStored: number;
+  totalDeduped: number;
+  totalFetchFailed: number;
+  totalParseFailed: number;
+  decisions: DecisionCounts;
+  companiesWithContact: number;
+  totalCompanies: number;
+  jobsByFreshness: Record<FreshnessStatus, number>;
+  totalJobs: number;
+  scoreBuckets: ScoreBucket[];
+  scorerVersionGroups: ScorerVersionGroup[];
+}
+
 export interface LeadRepository {
   startRun(input: { source: string; limit: number }): RunRecord;
   finishRun(runId: string, status: RunStatus, errorSummary?: string): void;
   getRun(runId: string): RunRecord | null;
+  // TB-11: most recent run by started_at DESC, or null when the DB has no
+  // runs at all (fresh install / freshly purged audit log). The CLI uses
+  // null as the signal for "(no runs yet — try `collect` first)".
+  getLatestRun(): RunRecord | null;
+  // TB-11: every run whose started_at >= cutoff, newest first. An empty
+  // result is still success — the CLI renders "(no runs in window)".
+  listRunsSince(cutoff: string): RunRecord[];
+  // TB-11: one round-trip for every aggregate the full report needs.
+  // Bundling here (rather than 8 separate methods) means each subquery
+  // sees the same `runIds` set, which the S-4 rule (scope FILTER, not
+  // just JOIN) demands. An empty runIds list returns the zero state so
+  // the renderer can branch on `totalCompanies === 0` once.
+  getReportStats(runIds: readonly string[]): ReportStatsAggregate;
   upsertCollectedLead(lead: CollectedLead, runId: string): StoredLeadResult;
   // Append a free-form event (e.g. "parse_failed", "fetch_failed") to the
   // run. countByRun aggregates these into the matching RunCounts field.
