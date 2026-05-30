@@ -6,10 +6,20 @@ export type PurgeMode =
   | { kind: "risk"; levels: RiskLevel[] }
   | { kind: "company"; domain: string };
 
+// TB-11 report scope as parsed from the CLI. Mirrors src/types/index.ts's
+// ReportScope by intent, but carries `cutoffMs` (millisecond delta) instead
+// of a resolved ISO cutoff — the CLI layer subtracts from `now` when it
+// runs so an operator setting `--since 30d` at 11pm gets the 11pm-30d
+// cutoff, not a noon-anchored one.
+export type ReportScopeArg =
+  | { kind: "latest" }
+  | { kind: "run"; runId: string }
+  | { kind: "since"; cutoffMs: number };
+
 export type ParsedArgs =
   | { kind: "help" }
   | { kind: "collect"; limit: number; source: string }
-  | { kind: "report"; runId: string }
+  | { kind: "report"; scope: ReportScopeArg }
   | { kind: "purge"; mode: PurgeMode; confirm: boolean }
   | { kind: "enrich"; target: "careers" | "github"; confirm: boolean }
   | { kind: "push-feishu"; dryRun: boolean; minScore: number }
@@ -23,7 +33,10 @@ Usage:
 
 Commands:
   collect [--limit N] [--source <name>]   Run a collector and store its leads.
-  report --run <id>                       Print the run summary for <id>.
+  report [--run <id>] [--since <Nd>]      Print the full report. With no flags shows
+                                          the latest run; --run <id> scopes to one
+                                          run; --since aggregates every run within
+                                          the window. --run and --since are exclusive.
   enrich careers [--yes]                  Probe each company's careers page; upgrade
                                           matching unknown jobs to usable (dry-run otherwise).
   enrich github  [--yes]                  Pull public GitHub org member profiles for any
@@ -101,11 +114,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 
   if (command === "report") {
-    const runFlag = readFlagSafe(rest, "--run");
-    if (!runFlag.present || runFlag.value === null) {
-      return { kind: "error", message: "report: --run <id> is required" };
-    }
-    return { kind: "report", runId: runFlag.value };
+    return parseReportArgs(rest);
   }
 
   if (command === "purge") {
@@ -125,6 +134,58 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 
   return { kind: "error", message: `Unknown command: ${command ?? ""}` };
+}
+
+function parseReportArgs(rest: string[]): ParsedArgs {
+  // Three modes:
+  //   1. (no flags)          → latest run
+  //   2. --run <id>          → that specific run
+  //   3. --since <duration>  → every run with started_at >= now - duration
+  // --run and --since are mutually exclusive; passing both is a clear user
+  // mistake (you can't aggregate across a window AND scope to one id), so
+  // we error rather than silently picking one.
+  const runFlag = readFlagSafe(rest, "--run");
+  const sinceFlag = readFlagSafe(rest, "--since");
+
+  if (runFlag.present && sinceFlag.present) {
+    return {
+      kind: "error",
+      message: "report: --run and --since are mutually exclusive (pick one)",
+    };
+  }
+
+  if (runFlag.present) {
+    if (runFlag.value === null) {
+      return { kind: "error", message: "report: --run requires a run id" };
+    }
+    return { kind: "report", scope: { kind: "run", runId: runFlag.value } };
+  }
+
+  if (sinceFlag.present) {
+    if (sinceFlag.value === null) {
+      return {
+        kind: "error",
+        message: "report: --since requires a duration (e.g. --since 30d)",
+      };
+    }
+    try {
+      const cutoffMs = parseAge(sinceFlag.value);
+      return { kind: "report", scope: { kind: "since", cutoffMs } };
+    } catch (err) {
+      // parseAge throws a self-explanatory message (`expected "Nd"`...).
+      // Surface it verbatim so the operator sees the same wording the
+      // purge flow uses — one less mental model.
+      return {
+        kind: "error",
+        message:
+          err instanceof Error
+            ? `report: ${err.message}`
+            : `report: ${String(err)}`,
+      };
+    }
+  }
+
+  return { kind: "report", scope: { kind: "latest" } };
 }
 
 function parseExportArgs(rest: string[]): ParsedArgs {

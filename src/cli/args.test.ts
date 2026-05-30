@@ -23,15 +23,73 @@ test("parseArgs collect with --limit and --source", () => {
   });
 });
 
-test("parseArgs report requires --run", () => {
+// --- report (TB-11 expanded scopes) --------------------------------------
+
+test("parseArgs report (no flags) defaults to the latest scope", () => {
+  // TB-11: the legacy `report --run <id>` is still supported, but bare
+  // `report` now means "latest run", matching the spec's "默认报告显示
+  // 最近一次 run".
+  expect(parseArgs(["report"])).toEqual({
+    kind: "report",
+    scope: { kind: "latest" },
+  });
+});
+
+test("parseArgs report --run <id> resolves to the run scope", () => {
   expect(parseArgs(["report", "--run", "abc"])).toEqual({
     kind: "report",
-    runId: "abc",
+    scope: { kind: "run", runId: "abc" },
   });
-  expect(parseArgs(["report"])).toEqual({
-    kind: "error",
-    message: "report: --run <id> is required",
-  });
+});
+
+test("parseArgs report --since <duration> parses the cutoff via parseAge", () => {
+  // parseAge returns milliseconds; the CLI layer converts that into an ISO
+  // cutoff for storage to compare against started_at.
+  const parsed = parseArgs(["report", "--since", "30d"]);
+  expect(parsed.kind).toBe("report");
+  if (parsed.kind === "report") {
+    expect(parsed.scope.kind).toBe("since");
+    if (parsed.scope.kind === "since") {
+      expect(parsed.scope.cutoffMs).toBe(30 * 86_400_000);
+    }
+  }
+});
+
+test("parseArgs report --run and --since together is an error (mutually exclusive)", () => {
+  const parsed = parseArgs(["report", "--run", "abc", "--since", "30d"]);
+  expect(parsed.kind).toBe("error");
+  if (parsed.kind === "error") {
+    expect(parsed.message).toMatch(/mutually exclusive/);
+  }
+});
+
+test("parseArgs report --run (no value) errors (A-3)", () => {
+  const parsed = parseArgs(["report", "--run"]);
+  expect(parsed.kind).toBe("error");
+  if (parsed.kind === "error") {
+    expect(parsed.message).toMatch(/--run/);
+  }
+});
+
+test("parseArgs report --since (no value) errors (A-3)", () => {
+  const parsed = parseArgs(["report", "--since"]);
+  expect(parsed.kind).toBe("error");
+  if (parsed.kind === "error") {
+    expect(parsed.message).toMatch(/--since/);
+  }
+});
+
+test("parseArgs report --since invalid duration bubbles parseAge error", () => {
+  const parsed = parseArgs(["report", "--since", "abc"]);
+  expect(parsed.kind).toBe("error");
+});
+
+test("parseArgs report --since --run catches flag-as-value (A-2)", () => {
+  const parsed = parseArgs(["report", "--since", "--run"]);
+  expect(parsed.kind).toBe("error");
+  if (parsed.kind === "error") {
+    expect(parsed.message).toMatch(/--since/);
+  }
 });
 
 test("parseArgs unknown command returns error", () => {
@@ -75,6 +133,8 @@ test("report --run --help errors with run-id missing, not help fallthrough", () 
   const parsed = parseArgs(["report", "--run", "--help"]);
   expect(parsed.kind).toBe("error");
   if (parsed.kind === "error") {
+    // Either --run-blame or --help-fallthrough is acceptable; the bug we're
+    // pinning down is the latter, so we assert at least one of them.
     expect(parsed.message).toMatch(/--run/);
   }
 });

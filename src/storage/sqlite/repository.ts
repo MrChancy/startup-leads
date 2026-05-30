@@ -18,10 +18,13 @@ import type {
   PurgeCounts,
   PushCandidate,
   PushCandidateQuery,
+  ReportStatsAggregate,
   RiskLevel,
   RunCounts,
   RunRecord,
   RunStatus,
+  ScoreBucket,
+  ScorerVersionGroup,
   StoredLeadResult,
   UnknownJobCandidate,
 } from "../../types/index.ts";
@@ -53,6 +56,95 @@ function normalizeTitle(name: string) {
 function extractGithubOrgSlug(raw: string): string | null {
   const match = raw.match(/github\.com\/([\w-]+)/i);
   return match ? match[1]!.toLowerCase() : null;
+}
+
+// TB-11 helpers. Kept at module scope so both the per-call closure in
+// getReportStats and any future caller (test setup, follow-up reports) can
+// reuse them without going through the repository factory.
+
+function zeroDecisionCounts(): DecisionCounts {
+  return {
+    acceptedForFeishu: 0,
+    localOnly: 0,
+    stale: 0,
+    blockedContact: 0,
+    needsReview: 0,
+    excludedByRule: 0,
+  };
+}
+
+// Each bucket's [lo, hi] is inclusive on both sides; `hi=null` is the
+// open-ended "85+" band. The bucket definition lives here (not in
+// src/types) so changing the thresholds is one diff in one place.
+function emptyScoreBuckets(): ScoreBucket[] {
+  return [
+    { label: "<50", lo: 0, hi: 49, count: 0 },
+    { label: "50-69", lo: 50, hi: 69, count: 0 },
+    { label: "70-84", lo: 70, hi: 84, count: 0 },
+    { label: "85+", lo: 85, hi: null, count: 0 },
+  ];
+}
+
+function pickBucket(buckets: ScoreBucket[], score: number): ScoreBucket | null {
+  for (const b of buckets) {
+    if (score >= b.lo && (b.hi === null || score <= b.hi)) {
+      return b;
+    }
+  }
+  return null;
+}
+
+// The zero state returned by getReportStats when runIds is empty. Kept
+// separate from `emptyScoreBuckets` so the renderer's "no runs yet" test
+// can rely on a stable, distinct shape (vs. "zero counts within a real
+// scope").
+function emptyReportStats(): ReportStatsAggregate {
+  return {
+    totalCandidates: 0,
+    totalStored: 0,
+    totalDeduped: 0,
+    totalFetchFailed: 0,
+    totalParseFailed: 0,
+    decisions: zeroDecisionCounts(),
+    companiesWithContact: 0,
+    totalCompanies: 0,
+    jobsByFreshness: { fresh: 0, usable: 0, stale: 0, unknown: 0 },
+    totalJobs: 0,
+    scoreBuckets: emptyScoreBuckets(),
+    scorerVersionGroups: [],
+  };
+}
+
+// Used by both countDecisionsByRun (single-row grouping) and
+// getReportStats (per-row increment). The switch is the single source of
+// truth for the decision-name → DecisionCounts-key mapping; adding a new
+// LeadScoreDecision value (TB-4 follow-up's 'duplicate', for example) is
+// a one-line change here.
+function applyDecisionRow(
+  counts: DecisionCounts,
+  decision: string,
+  n: number,
+): void {
+  switch (decision) {
+    case "accepted_for_feishu":
+      counts.acceptedForFeishu += n;
+      break;
+    case "local_only":
+      counts.localOnly += n;
+      break;
+    case "stale":
+      counts.stale += n;
+      break;
+    case "blocked_contact":
+      counts.blockedContact += n;
+      break;
+    case "needs_review":
+      counts.needsReview += n;
+      break;
+    case "excluded_by_rule":
+      counts.excludedByRule += n;
+      break;
+  }
 }
 
 // Partition direction tags into the legal subset (persisted) and rejected
@@ -866,28 +958,240 @@ export function createSqliteLeadRepository(db: Database): LeadRepository {
         excludedByRule: 0,
       };
       for (const row of decisionsByRun.all(runId)) {
-        switch (row.decision) {
-          case "accepted_for_feishu":
-            counts.acceptedForFeishu = row.n;
+        applyDecisionRow(counts, row.decision, row.n);
+      }
+      return counts;
+    },
+
+    // TB-11 -----------------------------------------------------------------
+
+    getLatestRun(): RunRecord | null {
+      // ORDER BY started_at DESC is the source-of-truth for "latest". The
+      // table also has an id (TEXT uuid) so falling back to id wouldn't
+      // give a meaningful ordering — the timestamp is the only signal.
+      const row = db
+        .query<
+          {
+            id: string;
+            started_at: string;
+            source: string;
+            limit_value: number;
+          },
+          []
+        >(
+          `SELECT id, started_at, source, limit_value FROM runs
+           ORDER BY started_at DESC LIMIT 1`,
+        )
+        .get();
+      if (!row) return null;
+      return {
+        id: row.id,
+        startedAt: row.started_at,
+        source: row.source,
+        limit: row.limit_value,
+      };
+    },
+
+    listRunsSince(cutoff: string): RunRecord[] {
+      // Strings compare lexicographically; ISO-8601 with the `Z` suffix is
+      // already chronologically sortable so we can use string >=. All
+      // started_at values in this codebase come from
+      // `new Date().toISOString()`, which always produces that format.
+      const rows = db
+        .query<
+          {
+            id: string;
+            started_at: string;
+            source: string;
+            limit_value: number;
+          },
+          [string]
+        >(
+          `SELECT id, started_at, source, limit_value FROM runs
+           WHERE started_at >= ?
+           ORDER BY started_at DESC`,
+        )
+        .all(cutoff);
+      // Map row → RunRecord (column-rename only — same fields exist on
+      // every domain object the repo speaks, so this isn't an I-3 violation).
+      return rows.map((row) => ({
+        id: row.id,
+        startedAt: row.started_at,
+        source: row.source,
+        limit: row.limit_value,
+      }));
+    },
+
+    getReportStats(runIds: readonly string[]): ReportStatsAggregate {
+      // Empty scope → the zero state. Skipping the SQL entirely (rather
+      // than running `WHERE IN ()` which is a syntax error in SQLite) is
+      // cheaper AND avoids the bound-parameter ceremony.
+      if (runIds.length === 0) {
+        return emptyReportStats();
+      }
+      // bun:sqlite's prepared statements take a fixed parameter count, so
+      // the IN-list expansion has to happen string-side. The runIds come
+      // from the same SQL (listRunsSince / getRun) — they're never user
+      // input — so direct interpolation is safe; but we use `?` placeholders
+      // anyway to keep the safety story uniform across the codebase.
+      const placeholders = runIds.map(() => "?").join(",");
+
+      // ---- pipeline counts (run_lead_events) -----------------------------
+      const counts: RunCounts = {
+        candidates: 0,
+        stored: 0,
+        deduped: 0,
+        fetchFailed: 0,
+        parseFailed: 0,
+      };
+      const eventRows = db
+        .query<{ event_type: string; n: number }, string[]>(
+          `SELECT event_type, COUNT(*) AS n FROM run_lead_events
+           WHERE run_id IN (${placeholders})
+           GROUP BY event_type`,
+        )
+        .all(...runIds);
+      for (const row of eventRows) {
+        switch (row.event_type) {
+          case "candidate":
+            counts.candidates = row.n;
             break;
-          case "local_only":
-            counts.localOnly = row.n;
+          case "stored":
+            counts.stored = row.n;
             break;
-          case "stale":
-            counts.stale = row.n;
+          case "deduped":
+            counts.deduped = row.n;
             break;
-          case "blocked_contact":
-            counts.blockedContact = row.n;
+          case "fetch_failed":
+            counts.fetchFailed = row.n;
             break;
-          case "needs_review":
-            counts.needsReview = row.n;
-            break;
-          case "excluded_by_rule":
-            counts.excludedByRule = row.n;
+          case "parse_failed":
+            counts.parseFailed = row.n;
             break;
         }
       }
-      return counts;
+
+      // ---- latest-score-per-company within the scope ---------------------
+      // S-4: the subquery filters on run_id IN (...) so the MAX(id) is the
+      // latest score WITHIN the scope, not the latest globally. A previous
+      // run's accepted score for the same company must NOT bleed into the
+      // current scope's stats.
+      const latestRows = db
+        .query<
+          {
+            company_id: number;
+            score: number;
+            decision: string;
+            scorer_version: string;
+          },
+          string[]
+        >(
+          `SELECT ls.company_id, ls.score, ls.decision, ls.scorer_version
+           FROM lead_scores ls
+           WHERE ls.run_id IN (${placeholders})
+             AND ls.id = (
+               SELECT MAX(ls2.id) FROM lead_scores ls2
+               WHERE ls2.company_id = ls.company_id
+                 AND ls2.run_id IN (${placeholders})
+             )`,
+        )
+        .all(...runIds, ...runIds);
+
+      // ---- decisions (overall + per-scorer-version) ----------------------
+      const decisions = zeroDecisionCounts();
+      const versionMap = new Map<string, ScorerVersionGroup>();
+      const scoreBuckets = emptyScoreBuckets();
+      const companyIds = new Set<number>();
+      for (const row of latestRows) {
+        applyDecisionRow(decisions, row.decision, 1);
+        const bucket = pickBucket(scoreBuckets, row.score);
+        if (bucket) bucket.count += 1;
+        companyIds.add(row.company_id);
+
+        let group = versionMap.get(row.scorer_version);
+        if (!group) {
+          group = {
+            scorerVersion: row.scorer_version,
+            decisions: zeroDecisionCounts(),
+            total: 0,
+          };
+          versionMap.set(row.scorer_version, group);
+        }
+        applyDecisionRow(group.decisions, row.decision, 1);
+        group.total += 1;
+      }
+      // Stable order: by scorer_version ASC. With semver-shaped strings this
+      // gives the user-friendly "oldest first" ordering except for the
+      // 1.10.0 / 1.2.0 case — but bumps are rare enough that lexicographic
+      // is fine until a real ordering need shows up.
+      const scorerVersionGroups = [...versionMap.values()].sort((a, b) =>
+        a.scorerVersion.localeCompare(b.scorerVersion),
+      );
+
+      // ---- contact coverage ---------------------------------------------
+      // Scope: any contact for one of the in-scope companies. We use the
+      // latest-scored set (companyIds collected above) so coverage stays
+      // consistent with "what the report's other numbers describe".
+      let companiesWithContact = 0;
+      if (companyIds.size > 0) {
+        const companyPlaceholders = [...companyIds].map(() => "?").join(",");
+        const row = db
+          .query<{ n: number }, number[]>(
+            `SELECT COUNT(DISTINCT company_id) AS n FROM contacts
+             WHERE company_id IN (${companyPlaceholders})`,
+          )
+          .get(...companyIds);
+        companiesWithContact = row?.n ?? 0;
+      }
+
+      // ---- jobs by freshness --------------------------------------------
+      const jobsByFreshness: Record<FreshnessStatus, number> = {
+        fresh: 0,
+        usable: 0,
+        stale: 0,
+        unknown: 0,
+      };
+      let totalJobs = 0;
+      if (companyIds.size > 0) {
+        const companyPlaceholders = [...companyIds].map(() => "?").join(",");
+        const jobRows = db
+          .query<
+            { freshness_status: string | null; n: number },
+            number[]
+          >(
+            `SELECT freshness_status, COUNT(*) AS n FROM jobs
+             WHERE company_id IN (${companyPlaceholders})
+             GROUP BY freshness_status`,
+          )
+          .all(...companyIds);
+        for (const row of jobRows) {
+          const band = (row.freshness_status as FreshnessStatus | null) ?? "unknown";
+          if (
+            band === "fresh" ||
+            band === "usable" ||
+            band === "stale" ||
+            band === "unknown"
+          ) {
+            jobsByFreshness[band] += row.n;
+          }
+          totalJobs += row.n;
+        }
+      }
+
+      return {
+        totalCandidates: counts.candidates,
+        totalStored: counts.stored,
+        totalDeduped: counts.deduped,
+        totalFetchFailed: counts.fetchFailed,
+        totalParseFailed: counts.parseFailed,
+        decisions,
+        companiesWithContact,
+        totalCompanies: companyIds.size,
+        jobsByFreshness,
+        totalJobs,
+        scoreBuckets,
+        scorerVersionGroups,
+      };
     },
 
     previewPurgeOlderThan(cutoff: string): PurgeCounts {
