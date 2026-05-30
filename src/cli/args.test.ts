@@ -181,7 +181,23 @@ test("parseArgs enrich with no target is an error", () => {
 });
 
 test("parseArgs enrich with unknown target is an error", () => {
-  const r = parseArgs(["enrich", "github"]);
+  const r = parseArgs(["enrich", "linkedin"]);
   expect(r.kind).toBe("error");
   expect(r.kind === "error" && r.message).toMatch(/unknown target/);
+});
+
+test("parseArgs enrich github defaults to confirm=false (dry-run)", () => {
+  expect(parseArgs(["enrich", "github"])).toEqual({
+    kind: "enrich",
+    target: "github",
+    confirm: false,
+  });
+});
+
+test("parseArgs enrich github --yes flips confirm", () => {
+  expect(parseArgs(["enrich", "github", "--yes"])).toEqual({
+    kind: "enrich",
+    target: "github",
+    confirm: true,
+  });
 });

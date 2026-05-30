@@ -13,6 +13,10 @@ import {
   formatEnrichResult,
   runEnrichCareers,
 } from "../enrichers/careers/index.ts";
+import {
+  formatEnrichGithubResult,
+  runEnrichGithub,
+} from "../enrichers/github/index.ts";
 import type { Collector } from "../collectors/types.ts";
 
 const COLLECTORS: Record<string, Collector> = {
@@ -74,15 +78,31 @@ async function main() {
 
     if (parsed.kind === "enrich") {
       // Production wiring: real HttpClient (rate-limited by QPS env var) and
-      // wall-clock now. Tests drive runEnrichCareers directly with fakes.
+      // wall-clock now. Tests drive runEnrich* directly with fakes.
       const http = createHttpClient();
-      const result = await runEnrichCareers({
+      if (parsed.target === "careers") {
+        const result = await runEnrichCareers({
+          repo,
+          http,
+          confirm: parsed.confirm,
+          now: () => new Date(),
+        });
+        process.stdout.write(formatEnrichResult(result, parsed.confirm) + "\n");
+        return;
+      }
+      // target === "github": forward GITHUB_TOKEN from the real env so the
+      // enricher can lift the 60 req/h unauth quota when the operator
+      // supplies a PAT.
+      const result = await runEnrichGithub({
         repo,
         http,
         confirm: parsed.confirm,
         now: () => new Date(),
+        env: process.env,
       });
-      process.stdout.write(formatEnrichResult(result, parsed.confirm) + "\n");
+      process.stdout.write(
+        formatEnrichGithubResult(result, parsed.confirm) + "\n",
+      );
       return;
     }
   } finally {

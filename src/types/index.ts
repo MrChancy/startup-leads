@@ -149,6 +149,49 @@ export type CareersSourceWrite =
   | CareersSourceWriteSuccess
   | CareersSourceWriteFailure;
 
+// What listGithubOrgCandidates returns. One row per (company, org_slug)
+// pair derived from existing `contact_type='github'` rows. Companies with
+// no github contact are not returned — the enricher waits until somebody
+// actually leaked a github URL before acting (no guess-the-org heuristic).
+export interface GithubOrgCandidate {
+  companyId: number;
+  // The path segment after `github.com/`. Lower-cased; never includes a
+  // slash, trailing dot, or query string. May be either an org or a user;
+  // the API tells us which when we hit /orgs/<slug>/public_members (404 on
+  // user accounts), so we don't try to guess here.
+  orgSlug: string;
+}
+
+// Persisted shape for one github-sourced contact. priorityRank is assigned
+// by the ranker BEFORE the call so the repo never re-orders rows; we want
+// "what the ranker said" to land in the DB verbatim.
+export interface GithubEnrichmentContact {
+  contactType: "email" | "github";
+  value: string;
+  profileUrl: string | null;
+  name: string | null;
+  riskLevel: "low" | "medium";
+  priorityRank: number;
+}
+
+interface GithubEnrichmentInputCommon {
+  companyId: number;
+  orgSlug: string;
+  contacts: ReadonlyArray<GithubEnrichmentContact>;
+}
+
+export type GithubEnrichmentInput =
+  | (GithubEnrichmentInputCommon & {
+      fetchStatus: "success";
+      errorCode?: undefined;
+      errorMessage?: undefined;
+    })
+  | (GithubEnrichmentInputCommon & {
+      fetchStatus: "failed" | "deferred";
+      errorCode: string;
+      errorMessage: string;
+    });
+
 // Subset of ScoreCompanyInput the repo can rebuild from rows. The enricher
 // then layers the scorer-specific `now` and computes the rest. We import
 // from scoring here is intentional — re-scoring is the whole point of the
@@ -240,4 +283,25 @@ export interface LeadRepository {
   // Read back everything the scorer needs to re-score a company after an
   // enrichment write. `now` is injected so tests stay deterministic.
   getCompanyScoreInput(companyId: number, now: Date): CompanyScoreInputView;
+
+  // TB-10 GitHub enricher. Additive: existing callers don't touch these.
+  //
+  // Returns one (companyId, orgSlug) per company that has at least one
+  // `contact_type='github'` row whose value path-segment looks like an org
+  // slug. Companies without a github contact are not returned — the
+  // enricher acts only on signals a real source already gave us.
+  listGithubOrgCandidates(): GithubOrgCandidate[];
+
+  // Persist a github enrichment outcome — one sources row plus 0..N
+  // contacts — in a single transaction (S-2). Contacts whose
+  // (company_id, contact_type, value) already exist are skipped silently
+  // so re-running the enricher is idempotent. Returns the new sources.id
+  // plus the count of contact rows actually inserted (excluding the
+  // silently-skipped duplicates) so the caller can drive an honest
+  // "contacts created" counter and gate its re-score on real change
+  // (careers C3 lesson — a re-score row with zero contact change just
+  // attributes a stale decision to the enrich run).
+  recordGithubEnrichment(
+    input: GithubEnrichmentInput,
+  ): { sourceId: number; insertedCount: number };
 }
